@@ -60,7 +60,7 @@ async function requestJson<T>(
     timeoutMs?: number;
   } = {}
 ): Promise<T> {
-  const { method = "GET", body, auth = true, timeoutMs = 4500 } = options;
+  const { method = "GET", body, auth = true, timeoutMs = 12000 } = options;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
@@ -74,8 +74,19 @@ async function requestJson<T>(
     headers.Authorization = `Bearer ${settings.token.trim()}`;
   }
 
+  const base = normalizeBase(settings.baseUrl);
+  const isLocalTarget =
+    base.startsWith("http://localhost") || base.startsWith("http://127.0.0.1");
+  const requestUrl =
+    typeof window !== "undefined" && !isLocalTarget
+      ? `/api/engine${path}`
+      : `${base}${path}`;
+  if (typeof window !== "undefined" && !isLocalTarget) {
+    headers["X-PockDev-Target"] = base;
+  }
+
   try {
-    const response = await fetch(`${normalizeBase(settings.baseUrl)}${path}`, {
+    const response = await fetch(requestUrl, {
       method,
       headers,
       body: body !== undefined ? JSON.stringify(body) : undefined,
@@ -102,7 +113,7 @@ async function requestJson<T>(
 export function createEngineClient(settings: EngineSettings) {
   return {
     getHealth: () =>
-      requestJson<HealthResponse>(settings, "/healthz", { auth: false, timeoutMs: 2500 }),
+      requestJson<HealthResponse>(settings, "/healthz", { auth: false, timeoutMs: 10000 }),
 
     getOverview: () => requestJson<Overview>(settings, "/api/overview"),
 

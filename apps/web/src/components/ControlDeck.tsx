@@ -173,42 +173,49 @@ export function ControlDeck() {
     }, 3600);
   }, []);
 
-  const syncFromEngine = useCallback(async (cfg: EngineSettings) => {
-    setMode("connecting");
-    const client = createEngineClient(cfg);
-    try {
-      const health = await client.getHealth();
-      if (!health.ok) throw new Error("Engine reported unhealthy status");
-      setUptimeSeconds(health.uptimeSeconds);
+  const syncFromEngine = useCallback(
+    async (cfg: EngineSettings, manual = false): Promise<boolean> => {
+      setMode("connecting");
+      const client = createEngineClient(cfg);
+      try {
+        const health = await client.getHealth();
+        if (!health.ok) throw new Error("Engine reported unhealthy status");
+        setUptimeSeconds(health.uptimeSeconds);
 
-      const [ov, prjs, incs, dlvs] = await Promise.all([
-        client.getOverview(),
-        client.listProjects(),
-        client.listIncidents(),
-        client.listDeliveries(),
-      ]);
+        const [ov, prjs, incs, dlvs] = await Promise.all([
+          client.getOverview(),
+          client.listProjects(),
+          client.listIncidents(),
+          client.listDeliveries(),
+        ]);
 
-      setLiveOverview(ov);
-      setProjects(prjs ?? []);
-      setIncidents(incs ?? []);
-      setDeliveries(dlvs ?? []);
-      setMode("live");
-      setConnectionNote(`Engine live; up ${formatUptime(health.uptimeSeconds)}`);
-    } catch (err) {
-      setLiveOverview(null);
-      setMode("demo");
-      const msg = err instanceof Error ? err.message : "";
-      if (msg.toLowerCase().includes("token") || msg.includes("401")) {
-        setConnectionNote(
-          "Engine reachable; add Bearer token in Engine link (using interactive demo)"
-        );
-      } else {
-        setConnectionNote(
-          "Interactive demo mode; connect Go engine anytime via Engine link"
-        );
+        setLiveOverview(ov);
+        setProjects(prjs ?? []);
+        setIncidents(incs ?? []);
+        setDeliveries(dlvs ?? []);
+        setMode("live");
+        setConnectionNote(`Engine live; up ${formatUptime(health.uptimeSeconds)}`);
+        return true;
+      } catch (err) {
+        setLiveOverview(null);
+        setMode("demo");
+        const msg = err instanceof Error ? err.message : "connection failed";
+        if (msg.toLowerCase().includes("token") || msg.includes("401")) {
+          setConnectionNote(
+            "Engine reachable; check API_TOKEN in Engine link (HTTP 401)"
+          );
+        } else if (manual || !cfg.baseUrl.includes("localhost")) {
+          setConnectionNote(`Could not connect (${msg}); showing demo orbit`);
+        } else {
+          setConnectionNote(
+            "Interactive demo mode; connect Go engine anytime via Engine link"
+          );
+        }
+        return false;
       }
-    }
-  }, []);
+    },
+    []
+  );
 
   useEffect(() => {
     const saved = loadEngineSettings();
@@ -271,8 +278,13 @@ export function ControlDeck() {
     };
     saveEngineSettings(next);
     setSettings(next);
-    setConfigOpen(false);
-    await syncFromEngine(next);
+    const ok = await syncFromEngine(next, true);
+    if (ok) {
+      setConfigOpen(false);
+      notify("Connected to live PockDev Go engine.");
+    } else {
+      notify("Could not connect to engine; check status note above.");
+    }
   };
 
   const handleReplayDelivery = async (deliveryId: string) => {
