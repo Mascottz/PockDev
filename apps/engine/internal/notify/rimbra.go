@@ -30,14 +30,18 @@ func (c *Client) EmailConfigured() bool {
 	return c != nil && c.APIKey != "" && c.EmailURL != ""
 }
 
-// SendWhatsApp posts one message through the Rimbra WhatsApp API.
+// SendWhatsApp posts one message through Rimbra Social notifications (/ntf/v1/messages).
 func (c *Client) SendWhatsApp(ctx context.Context, to, message string) error {
 	if !c.WhatsAppConfigured() {
 		return fmt.Errorf("Rimbra WhatsApp is not configured")
 	}
-	return c.post(ctx, c.WhatsAppURL, map[string]string{
-		"to":      to,
-		"message": message,
+	if strings.TrimSpace(to) != "" && !strings.HasPrefix(strings.TrimSpace(to), "+") {
+		to = "+" + strings.TrimSpace(to)
+	}
+	return c.post(ctx, c.WhatsAppURL, map[string]any{
+		"channel": "whatsapp",
+		"to":      strings.TrimSpace(to),
+		"content": map[string]string{"text": message},
 	})
 }
 
@@ -46,13 +50,13 @@ func (c *Client) SendEmail(ctx context.Context, subject, body string) error {
 	if !c.EmailConfigured() {
 		return fmt.Errorf("Rimbra Email is not configured")
 	}
-	return c.post(ctx, c.EmailURL, map[string]string{
+	return c.post(ctx, c.EmailURL, map[string]any{
 		"subject": subject,
 		"text":    body,
 	})
 }
 
-func (c *Client) post(ctx context.Context, url string, payload map[string]string) error {
+func (c *Client) post(ctx context.Context, url string, payload any) error {
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		return err

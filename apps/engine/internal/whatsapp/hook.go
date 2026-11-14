@@ -55,8 +55,27 @@ func (h *Hook) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var env struct {
+		Event string          `json:"event"`
+		Data  json.RawMessage `json:"data"`
+	}
+	_ = json.Unmarshal(raw, &env)
+	eventName := strings.TrimSpace(r.Header.Get("X-Rimbra-Event"))
+	if eventName == "" {
+		eventName = strings.TrimSpace(env.Event)
+	}
+	if eventName != "" && eventName != "message.received" {
+		httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "ignored": eventName})
+		return
+	}
+
+	payloadBytes := raw
+	if len(env.Data) > 2 && string(env.Data) != "null" {
+		payloadBytes = env.Data
+	}
+
 	var inbound Inbound
-	if err := json.Unmarshal(raw, &inbound); err != nil {
+	if err := json.Unmarshal(payloadBytes, &inbound); err != nil {
 		http.Error(w, "invalid JSON body", http.StatusBadRequest)
 		return
 	}
@@ -144,6 +163,16 @@ func (h *Hook) verify(r *http.Request, raw []byte) bool {
 	if sig == "" {
 		return false
 	}
+	ts := strings.TrimSpace(r.Header.Get("X-Rimbra-Timestamp"))
+	if ts != "" {
+		macTs := hmac.New(sha256.New, []byte(h.Secret))
+		macTs.Write([]byte(ts + "."))
+		macTs.Write(raw)
+		expTs := hex.EncodeToString(macTs.Sum(nil))
+		if hmac.Equal([]byte(strings.ToLower(sig)), []byte(expTs)) {
+			return true
+		}
+	}
 	mac := hmac.New(sha256.New, []byte(h.Secret))
 	mac.Write(raw)
 	expected := hex.EncodeToString(mac.Sum(nil))
@@ -161,6 +190,7 @@ func (i *Inbound) UnmarshalJSON(data []byte) error {
 	var nested struct {
 		From    any            `json:"from"`
 		Message map[string]any `json:"message"`
+		Content map[string]any `json:"content"`
 		Sender  any            `json:"sender"`
 		Phone   any            `json:"phone"`
 	}
@@ -173,6 +203,14 @@ func (i *Inbound) UnmarshalJSON(data []byte) error {
 		}
 		if i.From == "" {
 			i.From = asString(nested.Phone)
+		}
+		if i.Text == "" && nested.Content != nil {
+			for _, k := range []string{"text", "body", "content"} {
+				if v, ok := nested.Content[k]; ok {
+					i.Text = asString(v)
+					break
+				}
+			}
 		}
 		if i.Text == "" && nested.Message != nil {
 			for _, k := range []string{"text", "body", "content"} {
@@ -215,5 +253,8 @@ func asString(v any) string {
 func normalizePhone(p string) string {
 	p = strings.TrimSpace(p)
 	p = strings.TrimPrefix(p, "whatsapp:")
+	if p != "" && p[0] >= '0' && p[0] <= '9' {
+		p = "+" + p
+	}
 	return p
 }
