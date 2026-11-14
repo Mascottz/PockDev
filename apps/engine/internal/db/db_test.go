@@ -1,0 +1,42 @@
+package db
+
+import (
+	"context"
+	"os"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestSchemaIsIdempotentDDL(t *testing.T) {
+	for _, table := range []string{"projects", "deliveries", "incidents", "error_groups", "error_events"} {
+		if !strings.Contains(schemaSQL, "CREATE TABLE IF NOT EXISTS "+table) {
+			t.Fatalf("missing idempotent DDL for %s", table)
+		}
+	}
+	if strings.Contains(schemaSQL, "DROP ") {
+		t.Fatal("schema must not drop anything")
+	}
+}
+
+// TestMigrateIntegration runs against a real Postgres when DATABASE_URL is
+// set, and skips otherwise so go test ./... stays green everywhere.
+func TestMigrateIntegration(t *testing.T) {
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		t.Skip("DATABASE_URL not set, skipping Postgres integration test")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	pool, err := Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer pool.Close()
+	if err := Migrate(ctx, pool); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	if err := Migrate(ctx, pool); err != nil {
+		t.Fatalf("migrate twice must be idempotent: %v", err)
+	}
+}
