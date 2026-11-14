@@ -1,0 +1,16 @@
+{
+  "name": "pockdev-monorepo",
+  "private": true,
+  "workspaces": [
+    "packages/sdk",
+    "apps/web"
+  ],
+  "scripts": {
+    "build": "npm run build -w packages/sdk && npm run build -w apps/web",
+    "build:sdk": "npm run build -w packages/sdk",
+    "build:web": "npm run build -w apps/web",
+    "dev:web": "npm run dev -w apps/web",
+    "lint:web": "npm run lint -w apps/web",
+    "test:sdk": "npm run test -w packages/sdk"
+  }
+}
