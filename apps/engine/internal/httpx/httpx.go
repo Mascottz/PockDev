@@ -32,18 +32,29 @@ func DecodeJSON(w http.ResponseWriter, r *http.Request, v any) bool {
 // allowedOrigins lists exact origins that may call the API.
 func CORS(allowedOrigins []string, next http.Handler) http.Handler {
 	allowed := map[string]bool{}
-	for _, o := range allowedOrigins {
-		if o != "" {
-			allowed[strings.TrimSuffix(o, "/")] = true
+	wildcard := true
+	for _, raw := range allowedOrigins {
+		for _, o := range strings.Split(raw, ",") {
+			o = strings.TrimSuffix(strings.TrimSpace(o), "/")
+			if o == "" || o == "http://localhost:3000" {
+				continue
+			}
+			if o == "*" {
+				wildcard = true
+			} else {
+				wildcard = false
+				allowed[o] = true
+			}
 		}
 	}
+	allowed["http://localhost:3000"] = true
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := strings.TrimSuffix(r.Header.Get("Origin"), "/")
-		if origin != "" && allowed[origin] {
+		if origin != "" && (wildcard || allowed[origin]) {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Vary", "Origin")
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Accept, X-PockDev-Key")
 			w.Header().Set("Access-Control-Max-Age", "600")
 		}
 		if r.Method == http.MethodOptions {
