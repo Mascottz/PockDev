@@ -51,7 +51,7 @@ func FromEnv() Config {
 	return Config{
 		Port:                getenv("PORT", "8080"),
 		DatabaseURL:         os.Getenv("DATABASE_URL"),
-		DataDir:             getenv("DATA_DIR", ".data"),
+		DataDir:             getenv("DATA_DIR", "/tmp/pockdev-data"),
 		FrontendOrigin:      os.Getenv("FRONTEND_ORIGIN"),
 		APIToken:            os.Getenv("API_TOKEN"),
 		S3Endpoint:          os.Getenv("S3_ENDPOINT"),
