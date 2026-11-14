@@ -1,0 +1,268 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --font-syne: "Syne Variable", "Syne", sans-serif;
+  --font-jakarta: "Plus Jakarta Sans Variable", "Plus Jakarta Sans", sans-serif;
+  --font-mono: "IBM Plex Mono", monospace;
+
+  --silt: #0c0e0b;
+  --olive: #151913;
+  --basalt: #1e241b;
+  --moss: #2c3527;
+  --terracotta: #e05a33;
+  --citron: #c9f23d;
+  --chalk: #f3efe6;
+  --ash: #a5a196;
+  --cyan: #2ad4c5;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  background-color: var(--silt);
+  color: var(--chalk);
+  font-family: var(--font-jakarta);
+  min-height: 100%;
+  overflow-x: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background-color: rgba(201, 242, 61, 0.25);
+  color: #f3efe6;
+}
+
+/* Custom polygonal clip-paths: strict anti-rectangle and anti-pill system */
+.clip-octagon {
+  clip-path: polygon(
+    18px 0%,
+    calc(100% - 18px) 0%,
+    100% 18px,
+    100% calc(100% - 18px),
+    calc(100% - 18px) 100%,
+    18px 100%,
+    0% calc(100% - 18px),
+    0% 18px
+  );
+}
+
+.clip-octagon-sm {
+  clip-path: polygon(
+    10px 0%,
+    calc(100% - 10px) 0%,
+    100% 10px,
+    100% calc(100% - 10px),
+    calc(100% - 10px) 100%,
+    10px 100%,
+    0% calc(100% - 10px),
+    0% 10px
+  );
+}
+
+.clip-hex-bar {
+  clip-path: polygon(
+    18px 0%,
+    calc(100% - 18px) 0%,
+    100% 50%,
+    calc(100% - 18px) 100%,
+    18px 100%,
+    0% 50%
+  );
+}
+
+.clip-hex-sm {
+  clip-path: polygon(
+    9px 0%,
+    calc(100% - 9px) 0%,
+    100% 50%,
+    calc(100% - 9px) 100%,
+    9px 100%,
+    0% 50%
+  );
+}
+
+.clip-prism {
+  clip-path: polygon(13px 0%, 100% 0%, calc(100% - 13px) 100%, 0% 100%);
+}
+
+.clip-prism-sm {
+  clip-path: polygon(8px 0%, 100% 0%, calc(100% - 8px) 100%, 0% 100%);
+}
+
+.clip-diamond-cut {
+  clip-path: polygon(
+    28px 0%,
+    100% 0%,
+    100% calc(100% - 28px),
+    calc(100% - 28px) 100%,
+    0% 100%,
+    0% 28px
+  );
+}
+
+.clip-bevel-chat {
+  clip-path: polygon(
+    0% 0%,
+    calc(100% - 14px) 0%,
+    100% 14px,
+    100% 100%,
+    14px 100%,
+    0% calc(100% - 14px)
+  );
+}
+
+.clip-circle {
+  clip-path: circle(50% at 50% 50%);
+}
+
+/* Kinetic SVG conduits and orbital motion */
+@keyframes flowDash {
+  from {
+    stroke-dashoffset: 96;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+@keyframes flowDashReverse {
+  from {
+    stroke-dashoffset: 0;
+  }
+  to {
+    stroke-dashoffset: 96;
+  }
+}
+
+@keyframes orbitSpin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes orbitSpinReverse {
+  from {
+    transform: rotate(360deg);
+  }
+  to {
+    transform: rotate(0deg);
+  }
+}
+
+@keyframes ringBreath {
+  0%,
+  100% {
+    transform: scale(0.96);
+    opacity: 0.55;
+  }
+  50% {
+    transform: scale(1.06);
+    opacity: 1;
+  }
+}
+
+@keyframes beaconExpand {
+  0% {
+    transform: scale(0.9);
+    opacity: 0.85;
+  }
+  100% {
+    transform: scale(1.6);
+    opacity: 0;
+  }
+}
+
+.flow-conduit-calm {
+  stroke-dasharray: 12 20;
+  animation: flowDash 3.2s linear infinite;
+}
+
+.flow-conduit-active {
+  stroke-dasharray: 10 14;
+  animation: flowDash 1.5s linear infinite;
+}
+
+.flow-conduit-alert {
+  stroke-dasharray: 7 9;
+  animation: flowDash 0.95s linear infinite;
+}
+
+.flow-conduit-return {
+  stroke-dasharray: 10 14;
+  animation: flowDashReverse 1.3s linear infinite;
+}
+
+.svg-origin-center {
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+.orbital-cw-slow {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: orbitSpin 26s linear infinite;
+}
+
+.orbital-cw-med {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: orbitSpin 13s linear infinite;
+}
+
+.orbital-cw-fast {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: orbitSpin 6.5s linear infinite;
+}
+
+.orbital-ccw {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: orbitSpinReverse 18s linear infinite;
+}
+
+.orbital-breath {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: ringBreath 3.8s ease-in-out infinite;
+}
+
+.beacon-shockwave {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: beaconExpand 2.2s cubic-bezier(0.16, 1, 0.3, 1) infinite;
+}
+
+/* Subtle volcanic geometric backdrop grid (no gradients, pure hairline geometry) */
+.volcanic-grid {
+  background-image:
+    linear-gradient(to right, rgba(44, 53, 39, 0.24) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(44, 53, 39, 0.24) 1px, transparent 1px);
+  background-size: 64px 64px;
+}
+
+/* Crisp custom scrollbars in smoked olive */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #0c0e0b;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #2c3527;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #c9f23d;
+}
