@@ -387,14 +387,6 @@ func (s *Store) RecordErrorEvent(ctx context.Context, ev *model.ErrorEvent, wind
 	}
 	defer tx.Rollback(ctx)
 
-	_, err = tx.Exec(ctx, `
-		INSERT INTO error_events (id, project_id, group_id, message, stack, file_path, line, delivery_id, created_at)
-		VALUES ($1, $2, '', $3, $4, $5, $6, $7, $8)`,
-		ev.ID, ev.ProjectID, ev.Message, ev.Stack, ev.FilePath, ev.Line, ev.DeliveryID, ev.CreatedAt)
-	if err != nil {
-		return nil, err
-	}
-
 	var g model.ErrorGroup
 	err = tx.QueryRow(ctx, `
 		SELECT id, project_id, fingerprint, title, file_path, line, event_count, window_count,
@@ -446,7 +438,11 @@ func (s *Store) RecordErrorEvent(ctx context.Context, ev *model.ErrorEvent, wind
 		}
 	}
 
-	_, err = tx.Exec(ctx, `UPDATE error_events SET group_id = $2 WHERE id = $1`, ev.ID, g.ID)
+	ev.GroupID = g.ID
+	_, err = tx.Exec(ctx, `
+		INSERT INTO error_events (id, project_id, group_id, message, stack, file_path, line, delivery_id, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+		ev.ID, ev.ProjectID, g.ID, ev.Message, ev.Stack, ev.FilePath, ev.Line, ev.DeliveryID, ev.CreatedAt)
 	if err != nil {
 		return nil, err
 	}
