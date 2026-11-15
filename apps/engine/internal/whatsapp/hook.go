@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -52,11 +53,16 @@ func (h *Hook) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !h.verify(r, raw) {
-		secPrefix := strings.TrimSpace(h.Secret)
-		if len(secPrefix) > 6 {
-			secPrefix = secPrefix[:6]
+		hdrSummary := make([]string, 0, len(r.Header))
+		for k, vals := range r.Header {
+			lk := strings.ToLower(k)
+			if strings.Contains(lk, "sig") || strings.Contains(lk, "time") || strings.Contains(lk, "rimbra") || strings.Contains(lk, "webhook") || strings.Contains(lk, "svix") || strings.Contains(lk, "event") {
+				hdrSummary = append(hdrSummary, fmt.Sprintf("%s=%q", k, strings.Join(vals, ",")))
+			} else {
+				hdrSummary = append(hdrSummary, k)
+			}
 		}
-		log.Printf("whatsapp hook: 401 invalid signature (ts=%q sig=%q secret_prefix=%q)", r.Header.Get("X-Rimbra-Timestamp"), r.Header.Get("X-Rimbra-Signature"), secPrefix)
+		log.Printf("whatsapp hook: 401 headers=%v body_len=%d", hdrSummary, len(raw))
 		http.Error(w, "invalid signature", http.StatusUnauthorized)
 		return
 	}
@@ -158,33 +164,75 @@ func (h *Hook) send(ctx context.Context, phone, text string) {
 
 // verify checks Rimbra's HMAC SHA 256 webhook signature in X-Rimbra-Signature
 // (format sha256=<hex>) against the raw body.
+func firstHeader(r *http.Request, names ...string) string {
+	for _, n := range names {
+		if v := strings.TrimSpace(r.Header.Get(n)); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
 func (h *Hook) verify(r *http.Request, raw []byte) bool {
 	secret := strings.TrimSpace(h.Secret)
 	if secret == "" {
 		return false
 	}
-	sig := r.Header.Get("X-Rimbra-Signature")
-	if sig == "" {
-		sig = r.Header.Get("X-Rimbra-Signature-256")
-	}
-	sig = strings.TrimPrefix(sig, "sha256=")
-	if sig == "" {
+	rawSig := firstHeader(r,
+		"X-Rimbra-Signature", "X-Rimbra-Signature-256", "Rimbra-Signature",
+		"Webhook-Signature", "Svix-Signature", "X-Webhook-Signature",
+		"X-Signature", "X-Signature-256", "X-Hub-Signature-256",
+	)
+	if rawSig == "" {
 		return false
 	}
-	ts := strings.TrimSpace(r.Header.Get("X-Rimbra-Timestamp"))
-	if ts != "" {
-		macTs := hmac.New(sha256.New, []byte(secret))
-		macTs.Write([]byte(ts + "."))
-		macTs.Write(raw)
-		expTs := hex.EncodeToString(macTs.Sum(nil))
-		if hmac.Equal([]byte(strings.ToLower(sig)), []byte(expTs)) {
-			return true
+	ts := firstHeader(r,
+		"X-Rimbra-Timestamp", "Rimbra-Timestamp",
+		"Webhook-Timestamp", "Svix-Timestamp", "X-Webhook-Timestamp", "X-Timestamp",
+	)
+	msgID := firstHeader(r, "Webhook-Id", "Svix-Id", "X-Rimbra-Id", "X-Webhook-Id")
+
+	keys := [][]byte{[]byte(secret)}
+	if trimmed := strings.TrimPrefix(secret, "whsec_"); trimmed != secret {
+		keys = append(keys, []byte(trimmed))
+		if dec, err := base64.StdEncoding.DecodeString(trimmed); err == nil && len(dec) > 0 {
+			keys = append(keys, dec)
 		}
 	}
-	mac := hmac.New(sha256.New, []byte(secret))
-	mac.Write(raw)
-	expected := hex.EncodeToString(mac.Sum(nil))
-	return hmac.Equal([]byte(strings.ToLower(sig)), []byte(expected))
+
+	payloads := [][]byte{raw}
+	if ts != "" {
+		payloads = append([][]byte{[]byte(ts + "." + string(raw))}, payloads...)
+	}
+	if msgID != "" && ts != "" {
+		payloads = append([][]byte{[]byte(msgID + "." + ts + "." + string(raw))}, payloads...)
+	}
+
+	var candidates []string
+	for _, part := range strings.Fields(strings.ReplaceAll(rawSig, ",", " ")) {
+		p := strings.TrimSpace(part)
+		p = strings.TrimPrefix(p, "sha256=")
+		p = strings.TrimPrefix(p, "v1=")
+		if p != "" && p != "v1" {
+			candidates = append(candidates, p)
+		}
+	}
+
+	for _, k := range keys {
+		for _, pl := range payloads {
+			mac := hmac.New(sha256.New, k)
+			mac.Write(pl)
+			sum := mac.Sum(nil)
+			hexExp := hex.EncodeToString(sum)
+			b64Exp := base64.StdEncoding.EncodeToString(sum)
+			for _, cand := range candidates {
+				if hmac.Equal([]byte(strings.ToLower(cand)), []byte(hexExp)) || hmac.Equal([]byte(cand), []byte(b64Exp)) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // UnmarshalJSON pulls from and text out of the common Rimbra body shapes.
