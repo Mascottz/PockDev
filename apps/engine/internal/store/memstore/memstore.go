@@ -24,6 +24,7 @@ type Mem struct {
 	users        map[string]*model.User
 	userByGitHub map[int64]string
 	sessions     map[string]*model.Session
+	billingRefs  map[string]bool
 	nextGroup    int
 }
 
@@ -40,6 +41,7 @@ func New() *Mem {
 		users:        map[string]*model.User{},
 		userByGitHub: map[int64]string{},
 		sessions:     map[string]*model.Session{},
+		billingRefs:  map[string]bool{},
 	}
 	m.workspaces[store.DefaultWorkspaceID] = &model.Workspace{
 		ID:   store.DefaultWorkspaceID,
@@ -624,6 +626,133 @@ func (m *Mem) DeleteSession(_ context.Context, tokenHash string) error {
 	defer m.mu.Unlock()
 	delete(m.sessions, tokenHash)
 	return nil
+}
+
+// workspaceOfProjectLocked resolves the workspace owning a project row.
+func (m *Mem) workspaceOfProjectLocked(projectID string) (string, bool) {
+	p, ok := m.projects[projectID]
+	if !ok {
+		return "", false
+	}
+	return workspaceOf(p), true
+}
+
+func (m *Mem) WorkspaceUsage(_ context.Context, workspaceID string, monthStart time.Time) (int, int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	projects := 0
+	for _, p := range m.projects {
+		if workspaceOf(p) == workspaceID {
+			projects++
+		}
+	}
+	events := 0
+	for _, d := range m.deliveries {
+		if d.CreatedAt.Before(monthStart) {
+			continue
+		}
+		if wsp, ok := m.workspaceOfProjectLocked(d.ProjectID); ok && wsp == workspaceID {
+			events++
+		}
+	}
+	for _, ev := range m.events {
+		if ev.CreatedAt.Before(monthStart) {
+			continue
+		}
+		if wsp, ok := m.workspaceOfProjectLocked(ev.ProjectID); ok && wsp == workspaceID {
+			events++
+		}
+	}
+	return projects, events, nil
+}
+
+func (m *Mem) UpgradeWorkspacePro(_ context.Context, workspaceID, reference, customerCode, subscriptionCode, currency string, amountKobo int64, expiresAt time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.billingRefs[reference] {
+		return nil
+	}
+	w, ok := m.workspaces[workspaceID]
+	if !ok {
+		return store.ErrNotFound
+	}
+	m.billingRefs[reference] = true
+	w.Plan = model.PlanPro
+	w.PlanStatus = "active"
+	exp := expiresAt
+	w.PlanExpiresAt = &exp
+	if customerCode != "" {
+		w.PaystackCustomerCode = customerCode
+	}
+	if subscriptionCode != "" {
+		w.PaystackSubscriptionCode = subscriptionCode
+	}
+	return nil
+}
+
+func (m *Mem) CancelWorkspaceSubscription(_ context.Context, customerOrSubCode string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, w := range m.workspaces {
+		if w.PaystackCustomerCode == customerOrSubCode || w.PaystackSubscriptionCode == customerOrSubCode {
+			w.PlanStatus = "cancelled"
+			return nil
+		}
+	}
+	return store.ErrNotFound
+}
+
+func (m *Mem) PruneExpiredData(_ context.Context, now time.Time) ([]string, int, int, int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	deletedSessions := 0
+	for hash, s := range m.sessions {
+		if !s.ExpiresAt.After(now) {
+			delete(m.sessions, hash)
+			deletedSessions++
+		}
+	}
+
+	cutoffFor := func(projectID string) (time.Time, bool) {
+		wsp, ok := m.workspaceOfProjectLocked(projectID)
+		if !ok {
+			return time.Time{}, false
+		}
+		w := m.workspaces[wsp]
+		days := model.FreePlan().RetentionDays
+		if model.EffectivePlan(w, now) == model.PlanPro {
+			days = model.ProPlan(0).RetentionDays
+		}
+		return now.Add(-time.Duration(days) * 24 * time.Hour), true
+	}
+
+	deletedErrors := 0
+	for id, ev := range m.events {
+		cutoff, ok := cutoffFor(ev.ProjectID)
+		if !ok || !ev.CreatedAt.Before(cutoff) {
+			continue
+		}
+		delete(m.events, id)
+		deletedErrors++
+	}
+
+	storageKeys := []string{}
+	deletedDeliveries := 0
+	for id, d := range m.deliveries {
+		if d.Status != model.DeliveryDelivered && d.Status != model.DeliveryFailed {
+			continue
+		}
+		cutoff, ok := cutoffFor(d.ProjectID)
+		if !ok || !d.CreatedAt.Before(cutoff) {
+			continue
+		}
+		if d.StorageKey != "" {
+			storageKeys = append(storageKeys, d.StorageKey)
+		}
+		delete(m.deliveries, id)
+		deletedDeliveries++
+	}
+	return storageKeys, deletedDeliveries, deletedErrors, deletedSessions, nil
 }
 
 func copyHeaders(h map[string]string) map[string]string {

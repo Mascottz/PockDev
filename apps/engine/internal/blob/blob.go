@@ -13,6 +13,9 @@ import (
 type Store interface {
 	Put(ctx context.Context, key string, data []byte) error
 	Get(ctx context.Context, key string) ([]byte, error)
+	// Delete removes the body. Removing a missing key is not an error so
+	// retention sweeps stay idempotent.
+	Delete(ctx context.Context, key string) error
 }
 
 // CleanKey normalizes a storage key and rejects path traversal.

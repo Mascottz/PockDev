@@ -59,6 +59,22 @@ ALTER TABLE projects DROP CONSTRAINT IF EXISTS projects_slug_key;
 CREATE UNIQUE INDEX IF NOT EXISTS projects_workspace_slug_idx ON projects (workspace_id, slug);
 CREATE INDEX IF NOT EXISTS projects_workspace_idx ON projects (workspace_id, created_at ASC);
 
+-- Stage 3 billing: plan columns on workspaces plus idempotent payment records.
+ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS plan TEXT NOT NULL DEFAULT 'free';
+ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS plan_status TEXT NOT NULL DEFAULT 'active';
+ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS plan_expires_at TIMESTAMPTZ;
+ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS paystack_customer_code TEXT NOT NULL DEFAULT '';
+ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS paystack_subscription_code TEXT NOT NULL DEFAULT '';
+
+CREATE TABLE IF NOT EXISTS billing_events (
+    reference    TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+    amount_kobo  BIGINT NOT NULL DEFAULT 0,
+    currency     TEXT NOT NULL DEFAULT 'NGN',
+    status       TEXT NOT NULL DEFAULT 'success',
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS deliveries (
     id                  TEXT PRIMARY KEY,
     project_id          TEXT NOT NULL REFERENCES projects(id),
