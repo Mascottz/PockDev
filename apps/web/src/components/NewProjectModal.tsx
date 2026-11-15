@@ -1,14 +1,22 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import { slugifyName } from "@/lib/demo-data";
-import type { CreateProjectInput, Project } from "@/lib/types";
+import {
+  formatNairaFromKobo,
+  isQuotaExceededError,
+} from "@/lib/engine-client";
+import type { BillingStatus, CreateProjectInput, Project } from "@/lib/types";
 import { GeometricVessel } from "./GeometricVessel";
 import { PrismButton } from "./PrismButton";
 
 interface NewProjectModalProps {
   open: boolean;
   engineUrl: string;
+  billing?: BillingStatus | null;
+  upgrading?: boolean;
+  onUpgrade?: () => Promise<void> | void;
   onClose: () => void;
   onCreate: (input: CreateProjectInput) => Promise<Project>;
 }
@@ -40,6 +48,9 @@ function buildSdkSnippet(
 export function NewProjectModal({
   open,
   engineUrl,
+  billing = null,
+  upgrading = false,
+  onUpgrade,
   onClose,
   onCreate,
 }: NewProjectModalProps) {
@@ -51,6 +62,9 @@ export function NewProjectModal({
   const [whatsappPhone, setWhatsappPhone] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
+  const [quotaErrorMessage, setQuotaErrorMessage] = useState<string | null>(
+    null
+  );
   const [created, setCreated] = useState<Project | null>(null);
   const [sdkTarget, setSdkTarget] = useState<SdkTarget>("nextjs");
   const [copiedKey, setCopiedKey] = useState<"url" | "sdk" | "snippet" | null>(
@@ -68,6 +82,16 @@ export function NewProjectModal({
 
   if (!open) return null;
 
+  const limitReachedFromBilling = Boolean(
+    billing &&
+      billing.usage.projectsLimit > 0 &&
+      billing.usage.projectsUsed >= billing.usage.projectsLimit
+  );
+  const showQuotaUpgrade = !created && (limitReachedFromBilling || Boolean(quotaErrorMessage));
+  const proPriceLabel = billing
+    ? formatNairaFromKobo(billing.proPriceKobo, billing.currency)
+    : "NGN 15,000";
+
   const resetAndClose = () => {
     setName("");
     setSlug("");
@@ -76,6 +100,7 @@ export function NewProjectModal({
     setGithubRepo("");
     setWhatsappPhone("");
     setError("");
+    setQuotaErrorMessage(null);
     setCreated(null);
     onClose();
   };
@@ -88,6 +113,7 @@ export function NewProjectModal({
     }
     setSubmitting(true);
     setError("");
+    setQuotaErrorMessage(null);
     try {
       const project = await onCreate({
         name: name.trim(),
@@ -98,11 +124,33 @@ export function NewProjectModal({
       });
       setCreated(project);
     } catch (err) {
-      setError(
-        err instanceof Error ? err.message : "Could not create project."
-      );
+      if (isQuotaExceededError(err)) {
+        setQuotaErrorMessage(
+          err instanceof Error
+            ? err.message
+            : "Free plan includes up to 2 watched apps. Upgrade to Pro for up to 20 apps."
+        );
+      } else {
+        setError(
+          err instanceof Error ? err.message : "Could not create project."
+        );
+      }
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  const handleUpgradeClick = async () => {
+    if (!onUpgrade) return;
+    setError("");
+    try {
+      await onUpgrade();
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Could not launch Paystack checkout."
+      );
     }
   };
 
@@ -135,18 +183,28 @@ export function NewProjectModal({
       <div className="w-full max-w-2xl my-auto">
         <GeometricVessel
           shape="diamond-cut"
-          tone={created ? "cyan" : "citron"}
+          tone={created ? "cyan" : showQuotaUpgrade ? "terracotta" : "citron"}
           innerClassName="p-6 sm:p-8"
         >
           <div className="flex items-start justify-between gap-4 border-b border-moss pb-4">
             <div>
-              <span className="font-mono text-[11px] uppercase tracking-[0.2em] text-citron">
-                {created ? "Shield Ready" : "New Orbital Node"}
+              <span
+                className={`font-mono text-[11px] uppercase tracking-[0.2em] ${
+                  showQuotaUpgrade ? "text-terracotta" : "text-citron"
+                }`}
+              >
+                {created
+                  ? "Shield Ready"
+                  : showQuotaUpgrade
+                    ? "Plan Capacity Reached"
+                    : "New Orbital Node"}
               </span>
               <h2 className="mt-1 font-display text-2xl font-extrabold text-chalk">
                 {created
                   ? `${created.name} is now shielded`
-                  : "Add an app to PockDev"}
+                  : showQuotaUpgrade
+                    ? "Upgrade to add more apps"
+                    : "Add an app to PockDev"}
               </h2>
             </div>
             <PrismButton variant="olive" size="sm" onClick={resetAndClose}>
@@ -154,7 +212,110 @@ export function NewProjectModal({
             </PrismButton>
           </div>
 
-          {!created ? (
+          {showQuotaUpgrade ? (
+            <div className="mt-6 space-y-5">
+              <GeometricVessel
+                shape="octagon-sm"
+                tone="citron"
+                innerClassName="bg-silt p-5 sm:p-6"
+              >
+                <div className="flex items-start gap-4">
+                  <svg
+                    width="44"
+                    height="44"
+                    viewBox="0 0 48 48"
+                    className="shrink-0"
+                    aria-hidden="true"
+                  >
+                    <polygon
+                      points="24,4 44,15 44,33 24,44 4,33 4,15"
+                      fill="#141813"
+                      stroke="#E05A33"
+                      strokeWidth="1.8"
+                    />
+                    <polygon points="24,14 34,31 14,31" fill="none" stroke="#C9F23D" strokeWidth="1.8" />
+                    <circle cx="24" cy="25" r="2.2" fill="#C9F23D" />
+                  </svg>
+                  <div>
+                    <p className="font-mono text-[11px] uppercase tracking-[0.2em] text-citron">
+                      {billing?.plan === "pro" ? "Pro Orbit Limit" : "Free Shield Cap"}
+                    </p>
+                    <p className="mt-1.5 text-sm leading-relaxed text-chalk">
+                      {quotaErrorMessage ||
+                        `This workspace is watching ${billing?.usage.projectsUsed ?? 2} of ${billing?.usage.projectsLimit ?? 2} allowed apps on Free Shield. Upgrade to Pro Orbit to watch up to 20 apps, capture 100,000 monthly events, and keep 30 days of replay history.`}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="mt-5 grid grid-cols-3 gap-2.5">
+                  <div className="clip-octagon-sm bg-basalt px-3 py-2.5 text-center">
+                    <p className="font-display text-base font-extrabold text-citron">
+                      20 Apps
+                    </p>
+                    <p className="font-mono text-[10px] uppercase tracking-wider text-ash">
+                      Up from 2
+                    </p>
+                  </div>
+                  <div className="clip-octagon-sm bg-basalt px-3 py-2.5 text-center">
+                    <p className="font-display text-base font-extrabold text-citron">
+                      100k / mo
+                    </p>
+                    <p className="font-mono text-[10px] uppercase tracking-wider text-ash">
+                      Events
+                    </p>
+                  </div>
+                  <div className="clip-octagon-sm bg-basalt px-3 py-2.5 text-center">
+                    <p className="font-display text-base font-extrabold text-citron">
+                      30 Days
+                    </p>
+                    <p className="font-mono text-[10px] uppercase tracking-wider text-ash">
+                      Retention
+                    </p>
+                  </div>
+                </div>
+              </GeometricVessel>
+
+              {error ? (
+                <div className="clip-prism-sm bg-terracotta/20 border-l-2 border-terracotta px-4 py-2 font-mono text-xs text-terracotta">
+                  {error}
+                </div>
+              ) : null}
+
+              <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
+                <Link
+                  href="/pricing"
+                  onClick={resetAndClose}
+                  className="clip-prism-sm bg-basalt px-4 py-2 font-mono text-[11px] uppercase tracking-[0.16em] text-ash transition-colors hover:bg-moss hover:text-chalk"
+                >
+                  Compare plans
+                </Link>
+
+                <div className="flex flex-wrap items-center gap-3">
+                  <PrismButton
+                    type="button"
+                    variant="olive"
+                    size="md"
+                    onClick={resetAndClose}
+                  >
+                    Not now
+                  </PrismButton>
+                  {onUpgrade && billing?.plan !== "pro" ? (
+                    <PrismButton
+                      type="button"
+                      variant="citron"
+                      size="md"
+                      disabled={upgrading}
+                      onClick={handleUpgradeClick}
+                    >
+                      {upgrading
+                        ? "Opening Paystack..."
+                        : `Upgrade to Pro (${proPriceLabel}/mo)`}
+                    </PrismButton>
+                  ) : null}
+                </div>
+              </div>
+            </div>
+          ) : !created ? (
             <form onSubmit={handleSubmit} className="mt-6 space-y-4">
               <div className="grid gap-4 sm:grid-cols-2">
                 <label className="block">

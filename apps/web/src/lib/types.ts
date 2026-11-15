@@ -95,3 +95,26 @@ export interface EngineSettings {
   token: string;
   workspaceId?: string;
 }
+
+export interface BillingUsage {
+  projectsUsed: number;
+  projectsLimit: number;
+  monthlyEventsUsed: number;
+  monthlyEventsLimit: number;
+  retentionDays: number;
+}
+
+export interface BillingStatus {
+  plan: "free" | "pro";
+  planStatus: string;
+  planExpiresAt: string | null;
+  paystackConfigured: boolean;
+  currency: string;
+  proPriceKobo: number;
+  usage: BillingUsage;
+}
+
+export interface CheckoutResponse {
+  authorizationUrl: string;
+  reference: string;
+}

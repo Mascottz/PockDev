@@ -21,6 +21,7 @@ import {
   saveEngineSettings,
 } from "@/lib/engine-client";
 import type {
+  BillingStatus,
   CreateProjectInput,
   Delivery,
   EngineSettings,
@@ -39,6 +40,7 @@ import { NewWorkspaceModal } from "./NewWorkspaceModal";
 import { OrbitalConstellation } from "./OrbitalConstellation";
 import { OrbitalNode, type OrbitState } from "./OrbitalNode";
 import { PrismButton } from "./PrismButton";
+import { QuotaBar } from "./QuotaBar";
 import { WebhookRiver } from "./WebhookRiver";
 
 type ConnectionMode = "connecting" | "live" | "demo";
@@ -173,6 +175,11 @@ export function ControlDeck() {
   const [incidents, setIncidents] = useState<Incident[]>(DEMO_INCIDENTS);
   const [deliveries, setDeliveries] = useState<Delivery[]>(DEMO_DELIVERIES);
   const [liveOverview, setLiveOverview] = useState<Overview | null>(null);
+  const [billing, setBilling] = useState<BillingStatus | null>(null);
+  const [upgradingBilling, setUpgradingBilling] = useState(false);
+  const [verifyingBilling, setVerifyingBilling] = useState(false);
+  const [celebrationToast, setCelebrationToast] = useState("");
+  const verifiedRefRef = useRef<string | null>(null);
 
   const [selectedProjectId, setSelectedProjectId] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
@@ -228,6 +235,7 @@ export function ControlDeck() {
 
         if (!cfg.token.trim()) {
           setLiveOverview(null);
+          setBilling(null);
           setMe(null);
           saveCachedAuthUser(null);
           setAuthRequired(true);
@@ -238,12 +246,13 @@ export function ControlDeck() {
           return false;
         }
 
-        const [ov, prjs, incs, dlvs, meRes] = await Promise.all([
+        const [ov, prjs, incs, dlvs, meRes, billingRes] = await Promise.all([
           client.getOverview(),
           client.listProjects(),
           client.listIncidents(),
           client.listDeliveries(),
           client.getMe().catch(() => null),
+          client.getBilling().catch(() => null),
         ]);
 
         setLiveOverview(ov);
@@ -251,6 +260,7 @@ export function ControlDeck() {
         setIncidents(incs ?? []);
         setDeliveries(dlvs ?? []);
         setMe(meRes);
+        setBilling(billingRes);
         saveCachedAuthUser(meRes?.user ?? null);
         if (meRes?.workspace?.id && meRes.workspace.id !== cfg.workspaceId) {
           const synced: EngineSettings = {
@@ -268,6 +278,7 @@ export function ControlDeck() {
         return true;
       } catch (err) {
         setLiveOverview(null);
+        setBilling(null);
         setMe(null);
         saveCachedAuthUser(null);
         setMode("demo");
@@ -304,8 +315,58 @@ export function ControlDeck() {
     setSettings(saved);
     setDraftUrl(saved.baseUrl);
     setDraftToken(saved.token);
+
+    const params = new URLSearchParams(window.location.search);
+    const billingFlag = params.get("billing");
+    const paystackRef = (
+      params.get("reference") ||
+      params.get("trxref") ||
+      ""
+    ).trim();
+    const hasVerifyRedirect =
+      Boolean(paystackRef) &&
+      (billingFlag === "verify" || params.has("trxref"));
+
+    if (hasVerifyRedirect && verifiedRefRef.current !== paystackRef) {
+      verifiedRefRef.current = paystackRef;
+      params.delete("billing");
+      params.delete("reference");
+      params.delete("trxref");
+      const remaining = params.toString();
+      const cleanedUrl = `${window.location.pathname}${remaining ? `?${remaining}` : ""}${window.location.hash}`;
+      window.history.replaceState({}, "", cleanedUrl);
+
+      if (saved.token.trim()) {
+        setVerifyingBilling(true);
+        const client = createEngineClient(saved);
+        void client
+          .verifyBilling(paystackRef)
+          .then(async (verified) => {
+            await syncFromEngine(saved);
+            setBilling(verified);
+            setCelebrationToast(
+              "Workspace upgraded to Pro Orbit: 20 apps and 100,000 monthly events unlocked."
+            );
+          })
+          .catch(async (err) => {
+            await syncFromEngine(saved);
+            notify(
+              err instanceof Error
+                ? err.message
+                : "Could not verify Paystack payment reference."
+            );
+          })
+          .finally(() => {
+            setVerifyingBilling(false);
+          });
+        return;
+      }
+
+      notify("Sign in with GitHub to complete your Paystack verification.");
+    }
+
     void syncFromEngine(saved);
-  }, [syncFromEngine]);
+  }, [syncFromEngine, notify]);
 
   const overview: Overview = useMemo(() => {
     if (mode === "live" && liveOverview) return liveOverview;
@@ -377,6 +438,8 @@ export function ControlDeck() {
       setSettings(cleared);
       setDraftToken("");
       setMe(null);
+      setBilling(null);
+      setCelebrationToast("");
       setLiveOverview(null);
       setProjects(DEMO_PROJECTS);
       setIncidents(DEMO_INCIDENTS);
@@ -525,6 +588,31 @@ export function ControlDeck() {
     }
   };
 
+  const handleUpgradeToPro = async () => {
+    if (!settings.token.trim()) {
+      notify("Sign in with GitHub first to upgrade your workspace.");
+      return;
+    }
+    setUpgradingBilling(true);
+    try {
+      const client = createEngineClient(settings);
+      const callbackUrl = `${window.location.origin}/deck?billing=verify`;
+      const checkout = await client.startCheckout(callbackUrl);
+      if (!checkout.authorizationUrl) {
+        throw new Error("Paystack did not return a checkout URL.");
+      }
+      window.location.assign(checkout.authorizationUrl);
+    } catch (err) {
+      const msg =
+        err instanceof Error
+          ? err.message
+          : "Could not start Paystack checkout.";
+      notify(msg);
+      setUpgradingBilling(false);
+      throw err;
+    }
+  };
+
   const handleCreateProject = async (
     input: CreateProjectInput
   ): Promise<Project> => {
@@ -532,8 +620,12 @@ export function ControlDeck() {
       const client = createEngineClient(settings);
       const created = await client.createProject(input);
       setProjects((prev) => [created, ...prev]);
-      const ov = await client.getOverview();
+      const [ov, nextBilling] = await Promise.all([
+        client.getOverview(),
+        client.getBilling().catch(() => null),
+      ]);
       setLiveOverview(ov);
+      if (nextBilling) setBilling(nextBilling);
       notify(`Created shield for ${created.name}.`);
       return created;
     }
@@ -933,6 +1025,102 @@ export function ControlDeck() {
         ) : null}
       </GeometricVessel>
 
+      {/* Paystack Verification Banner */}
+      {verifyingBilling ? (
+        <div className="mt-5">
+          <GeometricVessel
+            shape="hex-bar"
+            tone="cyan"
+            innerClassName="px-6 py-3.5"
+          >
+            <div className="flex items-center gap-3">
+              <svg
+                width="18"
+                height="18"
+                viewBox="0 0 20 20"
+                className="shrink-0 orbital-cw-med"
+                aria-hidden="true"
+              >
+                <circle
+                  cx="10"
+                  cy="10"
+                  r="8"
+                  fill="none"
+                  stroke="#2AD4C5"
+                  strokeWidth="1.6"
+                  strokeDasharray="12 6"
+                />
+              </svg>
+              <p className="font-mono text-xs text-cyan">
+                Verifying Paystack payment and activating Pro Orbit...
+              </p>
+            </div>
+          </GeometricVessel>
+        </div>
+      ) : null}
+
+      {/* Celebratory Pro Upgrade Toast */}
+      {celebrationToast ? (
+        <div className="mt-5" role="status" aria-live="polite">
+          <GeometricVessel
+            shape="hex-bar"
+            tone="citron"
+            innerClassName="bg-olive px-6 py-4"
+          >
+            <div className="flex flex-wrap items-center justify-between gap-4">
+              <div className="flex items-center gap-3.5">
+                <svg
+                  width="26"
+                  height="26"
+                  viewBox="0 0 28 28"
+                  className="shrink-0"
+                  aria-hidden="true"
+                >
+                  <circle
+                    cx="14"
+                    cy="14"
+                    r="11"
+                    fill="none"
+                    stroke="#C9F23D"
+                    strokeWidth="1.6"
+                    strokeDasharray="7 3"
+                  />
+                  <polygon points="14,6 20,14 14,22 8,14" fill="#C9F23D" />
+                </svg>
+                <div>
+                  <span className="clip-hex-sm inline-block bg-citron px-2.5 py-0.5 font-mono text-[10px] font-bold uppercase tracking-[0.2em] text-silt">
+                    PRO ORBIT UNLOCKED
+                  </span>
+                  <p className="mt-1 font-display text-sm font-bold text-chalk">
+                    {celebrationToast}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setCelebrationToast("")}
+                className="clip-prism-sm bg-basalt px-3.5 py-1.5 font-mono text-[10px] uppercase tracking-wider text-chalk transition-colors hover:bg-citron hover:text-silt"
+              >
+                Dismiss
+              </button>
+            </div>
+          </GeometricVessel>
+        </div>
+      ) : null}
+
+      {/* Live Workspace Plan & Quota Bar */}
+      {mode === "live" && billing ? (
+        <section className="mt-5" aria-label="Workspace plan and quota usage">
+          <QuotaBar
+            billing={billing}
+            upgrading={upgradingBilling}
+            onUpgrade={() => {
+              void handleUpgradeToPro().catch(() => {});
+            }}
+          />
+        </section>
+      ) : null}
+
       {/* 4 Circular SVG Orbital Telemetry Dials */}
       <section
         aria-label="Live reliability telemetry"
@@ -1162,6 +1350,9 @@ export function ControlDeck() {
       <NewProjectModal
         open={newProjectOpen}
         engineUrl={settings.baseUrl}
+        billing={mode === "live" ? billing : null}
+        upgrading={upgradingBilling}
+        onUpgrade={mode === "live" ? handleUpgradeToPro : undefined}
         onClose={() => setNewProjectOpen(false)}
         onCreate={handleCreateProject}
       />

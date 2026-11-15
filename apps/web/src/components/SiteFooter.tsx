@@ -3,6 +3,7 @@ import { BrandMark } from "./BrandMark";
 
 const LINKS: { href: string; label: string; external?: boolean }[] = [
   { href: "/", label: "Overview" },
+  { href: "/pricing", label: "Pricing" },
   { href: "/deck", label: "Control Deck" },
   { href: "/brand", label: "Brand Kit" },
   { href: "https://github.com/Mascottz/PockDev", label: "GitHub", external: true },
