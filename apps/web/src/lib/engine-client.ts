@@ -1,33 +1,47 @@
 import type {
+  AuthUser,
   CreateProjectInput,
   Delivery,
   EngineSettings,
   HealthResponse,
   Incident,
   IncidentAction,
+  MeResponse,
   Overview,
   Project,
+  WorkspaceSummary,
 } from "./types";
 
 export const DEFAULT_ENGINE_URL =
   process.env.NEXT_PUBLIC_ENGINE_URL || "http://localhost:8080";
 
+export const AUTH_CHANGED_EVENT = "pockdev-auth-changed";
+
 const STORAGE_KEY = "pockdev_engine_settings_v1";
+const USER_STORAGE_KEY = "pockdev_auth_user_v1";
+
+function dispatchAuthChanged(): void {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new Event(AUTH_CHANGED_EVENT));
+}
 
 export function loadEngineSettings(): EngineSettings {
   if (typeof window === "undefined") {
-    return { baseUrl: DEFAULT_ENGINE_URL, token: "" };
+    return { baseUrl: DEFAULT_ENGINE_URL, token: "", workspaceId: "" };
   }
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (!raw) return { baseUrl: DEFAULT_ENGINE_URL, token: "" };
+    if (!raw) {
+      return { baseUrl: DEFAULT_ENGINE_URL, token: "", workspaceId: "" };
+    }
     const parsed = JSON.parse(raw) as Partial<EngineSettings>;
     return {
       baseUrl: parsed.baseUrl?.trim() || DEFAULT_ENGINE_URL,
       token: parsed.token?.trim() || "",
+      workspaceId: parsed.workspaceId?.trim() || "",
     };
   } catch {
-    return { baseUrl: DEFAULT_ENGINE_URL, token: "" };
+    return { baseUrl: DEFAULT_ENGINE_URL, token: "", workspaceId: "" };
   }
 }
 
@@ -39,15 +53,76 @@ export function saveEngineSettings(settings: EngineSettings): void {
       JSON.stringify({
         baseUrl: settings.baseUrl.trim() || DEFAULT_ENGINE_URL,
         token: settings.token.trim(),
+        workspaceId: settings.workspaceId?.trim() || "",
       })
     );
   } catch {
     // Ignore storage quota errors in restricted environments.
   }
+  dispatchAuthChanged();
+}
+
+export function loadCachedAuthUser(): AuthUser | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem(USER_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<AuthUser>;
+    if (!parsed.githubLogin) return null;
+    return {
+      id: parsed.id || "",
+      githubLogin: parsed.githubLogin,
+      name: parsed.name || "",
+      email: parsed.email || "",
+      avatarUrl: parsed.avatarUrl || "",
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function saveCachedAuthUser(user: AuthUser | null): void {
+  if (typeof window === "undefined") return;
+  try {
+    if (!user) {
+      window.localStorage.removeItem(USER_STORAGE_KEY);
+    } else {
+      window.localStorage.setItem(USER_STORAGE_KEY, JSON.stringify(user));
+    }
+  } catch {
+    // Ignore storage errors in restricted environments.
+  }
+  dispatchAuthChanged();
+}
+
+export function clearAuthSession(): EngineSettings {
+  const current = loadEngineSettings();
+  const cleared: EngineSettings = {
+    baseUrl: current.baseUrl,
+    token: "",
+    workspaceId: "",
+  };
+  if (typeof window !== "undefined") {
+    try {
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(cleared));
+      window.localStorage.removeItem(USER_STORAGE_KEY);
+    } catch {
+      // Ignore storage errors in restricted environments.
+    }
+    dispatchAuthChanged();
+  }
+  return cleared;
 }
 
 function normalizeBase(url: string): string {
   return (url.trim() || DEFAULT_ENGINE_URL).replace(/\/+$/, "");
+}
+
+export function buildGitHubLoginUrl(baseUrl: string, origin: string): string {
+  const cleanOrigin = origin.trim().replace(/\/+$/, "");
+  return `${normalizeBase(baseUrl)}/auth/github/start?redirect_to=${encodeURIComponent(
+    `${cleanOrigin}/auth/callback`
+  )}`;
 }
 
 async function requestJson<T>(
@@ -72,6 +147,9 @@ async function requestJson<T>(
   }
   if (auth && settings.token.trim()) {
     headers.Authorization = `Bearer ${settings.token.trim()}`;
+  }
+  if (auth && settings.workspaceId?.trim()) {
+    headers["X-PockDev-Workspace"] = settings.workspaceId.trim();
   }
 
   const base = normalizeBase(settings.baseUrl);
@@ -113,7 +191,23 @@ async function requestJson<T>(
 export function createEngineClient(settings: EngineSettings) {
   return {
     getHealth: () =>
-      requestJson<HealthResponse>(settings, "/healthz", { auth: false, timeoutMs: 10000 }),
+      requestJson<HealthResponse>(settings, "/healthz", {
+        auth: false,
+        timeoutMs: 10000,
+      }),
+
+    getMe: () => requestJson<MeResponse>(settings, "/api/me"),
+
+    createWorkspace: (name: string) =>
+      requestJson<WorkspaceSummary>(settings, "/api/workspaces", {
+        method: "POST",
+        body: { name },
+      }),
+
+    logout: () =>
+      requestJson<{ ok: boolean }>(settings, "/api/auth/logout", {
+        method: "POST",
+      }),
 
     getOverview: () => requestJson<Overview>(settings, "/api/overview"),
 
@@ -130,13 +224,20 @@ export function createEngineClient(settings: EngineSettings) {
       if (params?.projectId) search.set("projectId", params.projectId);
       if (params?.status) search.set("status", params.status);
       const qs = search.toString();
-      return requestJson<Delivery[]>(settings, `/api/deliveries${qs ? `?${qs}` : ""}`);
+      return requestJson<Delivery[]>(
+        settings,
+        `/api/deliveries${qs ? `?${qs}` : ""}`
+      );
     },
 
     replayDelivery: (id: string) =>
-      requestJson<Delivery>(settings, `/api/deliveries/${encodeURIComponent(id)}/replay`, {
-        method: "POST",
-      }),
+      requestJson<Delivery>(
+        settings,
+        `/api/deliveries/${encodeURIComponent(id)}/replay`,
+        {
+          method: "POST",
+        }
+      ),
 
     listIncidents: (projectId?: string) => {
       const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
@@ -144,9 +245,13 @@ export function createEngineClient(settings: EngineSettings) {
     },
 
     runIncidentAction: (id: string, action: IncidentAction) =>
-      requestJson<Incident>(settings, `/api/incidents/${encodeURIComponent(id)}/action`, {
-        method: "POST",
-        body: { action },
-      }),
+      requestJson<Incident>(
+        settings,
+        `/api/incidents/${encodeURIComponent(id)}/action`,
+        {
+          method: "POST",
+          body: { action },
+        }
+      ),
   };
 }
