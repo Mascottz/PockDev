@@ -115,7 +115,7 @@ func (a *Agent) Diagnose(ctx context.Context, incidentID string) error {
 			} else {
 				a.Logf("agent: whatsapp alert sent to %s for %s", project.WhatsAppPhone, inc.ID)
 				now := time.Now()
-				inc.LastAlertPhone = project.WhatsAppPhone
+				inc.LastAlertPhone = "+" + strings.TrimLeft(strings.NewReplacer(" ", "", "-", "").Replace(strings.TrimSpace(project.WhatsAppPhone)), "+")
 				inc.LastAlertAt = &now
 			}
 		} else {

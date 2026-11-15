@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -51,6 +52,11 @@ func (h *Hook) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !h.verify(r, raw) {
+		secPrefix := strings.TrimSpace(h.Secret)
+		if len(secPrefix) > 6 {
+			secPrefix = secPrefix[:6]
+		}
+		log.Printf("whatsapp hook: 401 invalid signature (ts=%q sig=%q secret_prefix=%q)", r.Header.Get("X-Rimbra-Timestamp"), r.Header.Get("X-Rimbra-Signature"), secPrefix)
 		http.Error(w, "invalid signature", http.StatusUnauthorized)
 		return
 	}
@@ -81,6 +87,7 @@ func (h *Hook) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	inbound.From = normalizePhone(inbound.From)
 	inbound.Text = strings.TrimSpace(inbound.Text)
+	log.Printf("whatsapp hook: event=%q from=%q text=%q raw=%s", eventName, inbound.From, inbound.Text, string(payloadBytes))
 	if inbound.From == "" || inbound.Text == "" {
 		http.Error(w, "from and text are required", http.StatusBadRequest)
 		return
@@ -152,7 +159,8 @@ func (h *Hook) send(ctx context.Context, phone, text string) {
 // verify checks Rimbra's HMAC SHA 256 webhook signature in X-Rimbra-Signature
 // (format sha256=<hex>) against the raw body.
 func (h *Hook) verify(r *http.Request, raw []byte) bool {
-	if h.Secret == "" {
+	secret := strings.TrimSpace(h.Secret)
+	if secret == "" {
 		return false
 	}
 	sig := r.Header.Get("X-Rimbra-Signature")
@@ -165,7 +173,7 @@ func (h *Hook) verify(r *http.Request, raw []byte) bool {
 	}
 	ts := strings.TrimSpace(r.Header.Get("X-Rimbra-Timestamp"))
 	if ts != "" {
-		macTs := hmac.New(sha256.New, []byte(h.Secret))
+		macTs := hmac.New(sha256.New, []byte(secret))
 		macTs.Write([]byte(ts + "."))
 		macTs.Write(raw)
 		expTs := hex.EncodeToString(macTs.Sum(nil))
@@ -173,7 +181,7 @@ func (h *Hook) verify(r *http.Request, raw []byte) bool {
 			return true
 		}
 	}
-	mac := hmac.New(sha256.New, []byte(h.Secret))
+	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write(raw)
 	expected := hex.EncodeToString(mac.Sum(nil))
 	return hmac.Equal([]byte(strings.ToLower(sig)), []byte(expected))
@@ -253,6 +261,13 @@ func asString(v any) string {
 func normalizePhone(p string) string {
 	p = strings.TrimSpace(p)
 	p = strings.TrimPrefix(p, "whatsapp:")
+	if idx := strings.IndexByte(p, '@'); idx > 0 {
+		p = p[:idx]
+	}
+	if idx := strings.IndexByte(p, ':'); idx > 0 {
+		p = p[:idx]
+	}
+	p = strings.NewReplacer(" ", "", "-", "").Replace(p)
 	if p != "" && p[0] >= '0' && p[0] <= '9' {
 		p = "+" + p
 	}
