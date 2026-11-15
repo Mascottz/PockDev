@@ -111,12 +111,15 @@ func (a *Agent) Diagnose(ctx context.Context, incidentID string) error {
 	if a.Notify != nil {
 		if project.WhatsAppPhone != "" && a.Notify.WhatsAppConfigured() {
 			if err := a.Notify.SendWhatsApp(ctx, project.WhatsAppPhone, message); err != nil {
-				a.Logf("agent: whatsapp alert failed: %v", err)
+				a.Logf("agent: whatsapp alert failed (to=%s): %v", project.WhatsAppPhone, err)
 			} else {
+				a.Logf("agent: whatsapp alert sent to %s for %s", project.WhatsAppPhone, inc.ID)
 				now := time.Now()
 				inc.LastAlertPhone = project.WhatsAppPhone
 				inc.LastAlertAt = &now
 			}
+		} else {
+			a.Logf("agent: whatsapp skipped (project_phone=%q api_configured=%v)", project.WhatsAppPhone, a.Notify.WhatsAppConfigured())
 		}
 		if a.Notify.EmailConfigured() {
 			subject := "PockDev alert: " + inc.Title

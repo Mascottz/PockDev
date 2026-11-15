@@ -154,7 +154,7 @@ func main() {
 	}()
 
 	go func() {
-		log.Printf("pockdev engine listening on :%s", cfg.Port)
+		log.Printf("pockdev engine listening on :%s (whatsapp_configured=%v)", cfg.Port, rimbra.WhatsAppConfigured())
 		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("http: %v", err)
 		}

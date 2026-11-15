@@ -156,11 +156,13 @@ func (s *Store) UpdateDelivery(ctx context.Context, d *model.Delivery) error {
 	}
 	tag, err := s.pool.Exec(ctx, `
 		UPDATE deliveries SET
-			status = $4, http_status = $5, attempt_count = $6, schema_drift_note = $7,
-			payload_preview = $8, payload_keys = $9, headers = $10, storage_key = $11,
-			linked_incident_id = $12, last_error = $13, next_attempt_at = $14,
-			updated_at = $16, delivered_at = $17
-		WHERE id = $1`, args...)
+			status = $2, http_status = $3, attempt_count = $4, schema_drift_note = $5,
+			payload_preview = $6, payload_keys = $7, headers = $8, storage_key = $9,
+			linked_incident_id = $10, last_error = $11, next_attempt_at = $12,
+			updated_at = $13, delivered_at = $14
+		WHERE id = $1`,
+		args[0], args[3], args[4], args[5], args[6], args[7], args[8], args[9],
+		args[10], args[11], args[12], args[13], args[15], args[16])
 	if err != nil {
 		return err
 	}

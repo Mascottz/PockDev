@@ -120,6 +120,10 @@ func (f *Forwarder) handle(ctx context.Context, d *model.Delivery) {
 	}
 
 	body, err := f.Blobs.Get(ctx, d.StorageKey)
+	if err != nil && d.PayloadPreview != "" {
+		body = []byte(d.PayloadPreview)
+		err = nil
+	}
 	if err != nil {
 		f.finishAttempt(ctx, d, 0, "payload body missing: "+err.Error(), true)
 		return
