@@ -29,6 +29,8 @@ async function proxy(
   };
   const auth = req.headers.get("authorization");
   if (auth) headers.Authorization = auth;
+  const workspace = req.headers.get("x-pockdev-workspace");
+  if (workspace) headers["X-PockDev-Workspace"] = workspace;
   const contentType = req.headers.get("content-type");
   if (contentType) headers["Content-Type"] = contentType;
 

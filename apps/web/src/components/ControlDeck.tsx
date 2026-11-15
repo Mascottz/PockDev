@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   applyDemoIncidentAction,
   applyDemoReplayDelivery,
@@ -12,9 +12,12 @@ import {
   DEMO_PROJECTS,
 } from "@/lib/demo-data";
 import {
+  buildGitHubLoginUrl,
+  clearAuthSession,
   createEngineClient,
   DEFAULT_ENGINE_URL,
   loadEngineSettings,
+  saveCachedAuthUser,
   saveEngineSettings,
 } from "@/lib/engine-client";
 import type {
@@ -23,12 +26,16 @@ import type {
   EngineSettings,
   Incident,
   IncidentAction,
+  MeResponse,
   Overview,
   Project,
+  WorkspaceSummary,
 } from "@/lib/types";
 import { GeometricVessel } from "./GeometricVessel";
+import { GitHubMark, OctagonAvatar } from "./GitHubMark";
 import { IncidentDrawer } from "./IncidentDrawer";
 import { NewProjectModal } from "./NewProjectModal";
+import { NewWorkspaceModal } from "./NewWorkspaceModal";
 import { OrbitalConstellation } from "./OrbitalConstellation";
 import { OrbitalNode, type OrbitState } from "./OrbitalNode";
 import { PrismButton } from "./PrismButton";
@@ -140,6 +147,7 @@ export function ControlDeck() {
   const [settings, setSettings] = useState<EngineSettings>({
     baseUrl: DEFAULT_ENGINE_URL,
     token: "",
+    workspaceId: "",
   });
   const [draftUrl, setDraftUrl] = useState(DEFAULT_ENGINE_URL);
   const [draftToken, setDraftToken] = useState("");
@@ -147,6 +155,16 @@ export function ControlDeck() {
 
   const [mode, setMode] = useState<ConnectionMode>("connecting");
   const [uptimeSeconds, setUptimeSeconds] = useState(0);
+  const [githubAuthConfigured, setGithubAuthConfigured] = useState<
+    boolean | null
+  >(null);
+  const [authRequired, setAuthRequired] = useState(false);
+  const [me, setMe] = useState<MeResponse | null>(null);
+  const [signingOut, setSigningOut] = useState(false);
+  const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
+  const [newWorkspaceOpen, setNewWorkspaceOpen] = useState(false);
+  const workspaceMenuRef = useRef<HTMLDivElement | null>(null);
+
   const [connectionNote, setConnectionNote] = useState(
     "Checking PockDev Go engine..."
   );
@@ -173,6 +191,27 @@ export function ControlDeck() {
     }, 3600);
   }, []);
 
+  useEffect(() => {
+    if (!workspaceMenuOpen) return;
+    const onPointer = (e: MouseEvent) => {
+      if (
+        workspaceMenuRef.current &&
+        !workspaceMenuRef.current.contains(e.target as Node)
+      ) {
+        setWorkspaceMenuOpen(false);
+      }
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setWorkspaceMenuOpen(false);
+    };
+    window.addEventListener("mousedown", onPointer);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("mousedown", onPointer);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [workspaceMenuOpen]);
+
   const syncFromEngine = useCallback(
     async (cfg: EngineSettings, manual = false): Promise<boolean> => {
       setMode("connecting");
@@ -181,34 +220,77 @@ export function ControlDeck() {
         const health = await client.getHealth();
         if (!health.ok) throw new Error("Engine reported unhealthy status");
         setUptimeSeconds(health.uptimeSeconds);
+        setGithubAuthConfigured(
+          typeof health.githubAuthConfigured === "boolean"
+            ? health.githubAuthConfigured
+            : null
+        );
 
-        const [ov, prjs, incs, dlvs] = await Promise.all([
+        if (!cfg.token.trim()) {
+          setLiveOverview(null);
+          setMe(null);
+          saveCachedAuthUser(null);
+          setAuthRequired(true);
+          setMode("demo");
+          setConnectionNote(
+            "Engine reachable; sign in with GitHub or explore the interactive demo orbit below"
+          );
+          return false;
+        }
+
+        const [ov, prjs, incs, dlvs, meRes] = await Promise.all([
           client.getOverview(),
           client.listProjects(),
           client.listIncidents(),
           client.listDeliveries(),
+          client.getMe().catch(() => null),
         ]);
 
         setLiveOverview(ov);
         setProjects(prjs ?? []);
         setIncidents(incs ?? []);
         setDeliveries(dlvs ?? []);
+        setMe(meRes);
+        saveCachedAuthUser(meRes?.user ?? null);
+        if (meRes?.workspace?.id && meRes.workspace.id !== cfg.workspaceId) {
+          const synced: EngineSettings = {
+            ...cfg,
+            workspaceId: meRes.workspace.id,
+          };
+          saveEngineSettings(synced);
+          setSettings(synced);
+        }
+        setAuthRequired(false);
         setMode("live");
-        setConnectionNote(`Engine live; up ${formatUptime(health.uptimeSeconds)}`);
+        setConnectionNote(
+          `Engine live; up ${formatUptime(health.uptimeSeconds)}`
+        );
         return true;
       } catch (err) {
         setLiveOverview(null);
+        setMe(null);
+        saveCachedAuthUser(null);
         setMode("demo");
         const msg = err instanceof Error ? err.message : "connection failed";
-        if (msg.toLowerCase().includes("token") || msg.includes("401")) {
+        const isUnauthorized =
+          msg.toLowerCase().includes("token") ||
+          msg.toLowerCase().includes("session") ||
+          msg.toLowerCase().includes("unauthorized") ||
+          msg.includes("401");
+        if (isUnauthorized || !cfg.token.trim()) {
+          setAuthRequired(true);
           setConnectionNote(
-            "Engine reachable; check API_TOKEN in Engine link (HTTP 401)"
+            isUnauthorized
+              ? "Session expired or invalid token; sign in with GitHub or check Advanced settings"
+              : "Sign in with GitHub to connect live apps, or explore the demo orbit below"
           );
         } else if (manual || !cfg.baseUrl.includes("localhost")) {
+          setAuthRequired(true);
           setConnectionNote(`Could not connect (${msg}); showing demo orbit`);
         } else {
+          setAuthRequired(true);
           setConnectionNote(
-            "Interactive demo mode; connect Go engine anytime via Engine link"
+            "Interactive demo mode; sign in with GitHub or connect a local engine"
           );
         }
         return false;
@@ -270,11 +352,87 @@ export function ControlDeck() {
     }
   };
 
+  const handleGitHubSignIn = () => {
+    const targetBase = draftUrl.trim() || settings.baseUrl || DEFAULT_ENGINE_URL;
+    if (targetBase !== settings.baseUrl) {
+      const updated = { ...settings, baseUrl: targetBase };
+      saveEngineSettings(updated);
+      setSettings(updated);
+    }
+    window.location.href = buildGitHubLoginUrl(
+      targetBase,
+      window.location.origin
+    );
+  };
+
+  const handleSignOut = async () => {
+    setSigningOut(true);
+    try {
+      if (settings.token.trim()) {
+        const client = createEngineClient(settings);
+        await client.logout().catch(() => null);
+      }
+    } finally {
+      const cleared = clearAuthSession();
+      setSettings(cleared);
+      setDraftToken("");
+      setMe(null);
+      setLiveOverview(null);
+      setProjects(DEMO_PROJECTS);
+      setIncidents(DEMO_INCIDENTS);
+      setDeliveries(DEMO_DELIVERIES);
+      setSelectedProjectId("");
+      setActiveIncidentId(null);
+      setWorkspaceMenuOpen(false);
+      setAuthRequired(true);
+      setMode("demo");
+      setConnectionNote("Signed out; exploring interactive demo orbit");
+      setSigningOut(false);
+      notify("Signed out of PockDev.");
+    }
+  };
+
+  const handleSwitchWorkspace = async (workspace: WorkspaceSummary) => {
+    setWorkspaceMenuOpen(false);
+    if (workspace.id === me?.workspace?.id) return;
+    const next: EngineSettings = {
+      ...settings,
+      workspaceId: workspace.id,
+    };
+    saveEngineSettings(next);
+    setSettings(next);
+    setSelectedProjectId("");
+    setActiveIncidentId(null);
+    const ok = await syncFromEngine(next, true);
+    if (ok) {
+      notify(`Switched workspace to ${workspace.name}.`);
+    }
+  };
+
+  const handleCreateWorkspace = async (
+    name: string
+  ): Promise<WorkspaceSummary> => {
+    const client = createEngineClient(settings);
+    const created = await client.createWorkspace(name);
+    const next: EngineSettings = {
+      ...settings,
+      workspaceId: created.id,
+    };
+    saveEngineSettings(next);
+    setSettings(next);
+    setSelectedProjectId("");
+    setActiveIncidentId(null);
+    await syncFromEngine(next, true);
+    notify(`Created workspace ${created.name} and switched into it.`);
+    return created;
+  };
+
   const handleSaveEngineConfig = async (e: React.FormEvent) => {
     e.preventDefault();
     const next: EngineSettings = {
       baseUrl: draftUrl.trim() || DEFAULT_ENGINE_URL,
       token: draftToken.trim(),
+      workspaceId: "",
     };
     saveEngineSettings(next);
     setSettings(next);
@@ -300,7 +458,11 @@ export function ControlDeck() {
         setLiveOverview(ov);
         notify(`Queued ${deliveryId} to send again.`);
       } else {
-        const result = applyDemoReplayDelivery(deliveries, incidents, deliveryId);
+        const result = applyDemoReplayDelivery(
+          deliveries,
+          incidents,
+          deliveryId
+        );
         setDeliveries(result.deliveries);
         setIncidents(result.incidents);
         notify(`Sent ${deliveryId} again -> HTTP 200 OK.`);
@@ -390,9 +552,98 @@ export function ControlDeck() {
     notify("Simulated crash caught and linked to held webhooks.");
   };
 
+  const showSignInBanner = mode === "demo" && (authRequired || !settings.token);
+
   return (
     <div className="mx-auto max-w-7xl px-5 pb-24 pt-7 sm:px-8">
-      {/* Top Engine Status & Control Ribbon */}
+      {/* Unauthenticated Geometric GitHub Sign-In Gate */}
+      {showSignInBanner ? (
+        <section id="signin" className="mb-6">
+          <GeometricVessel
+            shape="octagon"
+            tone="citron"
+            innerClassName="p-5 sm:p-7"
+          >
+            <div className="flex flex-col gap-5 lg:flex-row lg:items-center lg:justify-between">
+              <div className="flex items-start gap-4">
+                <svg
+                  width="54"
+                  height="54"
+                  viewBox="0 0 56 56"
+                  className="hidden shrink-0 sm:block overflow-visible"
+                  aria-hidden="true"
+                >
+                  <circle
+                    cx="28"
+                    cy="28"
+                    r="24"
+                    fill="none"
+                    stroke="#C9F23D"
+                    strokeOpacity="0.45"
+                    strokeWidth="1.3"
+                    strokeDasharray="10 7"
+                    className="orbital-cw-slow"
+                  />
+                  <polygon
+                    points="28,11 43,37 13,37"
+                    fill="#1E241B"
+                    stroke="#C9F23D"
+                    strokeWidth="1.8"
+                  />
+                  <circle cx="28" cy="29" r="3.4" fill="#2AD4C5" />
+                </svg>
+                <div className="max-w-2xl">
+                  <div className="flex flex-wrap items-center gap-2.5">
+                    <span className="clip-hex-sm bg-citron px-3 py-0.5 font-mono text-[10px] font-bold uppercase tracking-wider text-silt">
+                      Live Workspace Access
+                    </span>
+                    <span className="font-mono text-[11px] uppercase tracking-wider text-ash">
+                      Demo constellation active below
+                    </span>
+                  </div>
+                  <h2 className="mt-2 font-display text-xl font-extrabold text-chalk sm:text-2xl">
+                    Sign in with GitHub to shield your real apps
+                  </h2>
+                  <p className="mt-1.5 text-sm leading-relaxed text-ash">
+                    Connect your PockDev workspaces in one click to catch real
+                    webhooks, isolate team orbits, and draft fix PRs right from
+                    WhatsApp. You can also explore every replay and fix trigger
+                    in demo mode below.
+                  </p>
+                  {githubAuthConfigured === false ? (
+                    <p className="mt-2 font-mono text-xs text-cyan">
+                      Note: this engine does not have GitHub OAuth configured
+                      yet; use Advanced: Engine URL &amp; API Token to connect.
+                    </p>
+                  ) : null}
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-3 shrink-0">
+                <PrismButton
+                  variant="citron"
+                  size="md"
+                  onClick={handleGitHubSignIn}
+                >
+                  <GitHubMark size={16} />
+                  Sign in with GitHub
+                </PrismButton>
+                <PrismButton
+                  variant="olive"
+                  size="sm"
+                  onClick={() => setConfigOpen((v) => !v)}
+                >
+                  {configOpen
+                    ? "Hide advanced link"
+                    : "Advanced: Engine URL & API Token"}
+                </PrismButton>
+              </div>
+            </div>
+          </GeometricVessel>
+        </section>
+      ) : null}
+
+      {/* Top Engine Status, Workspace Switcher & Account Ribbon */}
       <GeometricVessel
         shape="octagon-sm"
         tone={mode === "live" ? "citron" : "cyan"}
@@ -444,13 +695,160 @@ export function ControlDeck() {
           </div>
 
           <div className="flex flex-wrap items-center gap-2.5">
+            {/* Signed-In Geometric Workspace Switcher */}
+            {mode === "live" && me ? (
+              <div className="relative" ref={workspaceMenuRef}>
+                <button
+                  type="button"
+                  onClick={() => setWorkspaceMenuOpen((v) => !v)}
+                  aria-expanded={workspaceMenuOpen}
+                  aria-haspopup="menu"
+                  className="clip-octagon-sm bg-cyan/80 p-[1px] transition-transform active:scale-[0.98]"
+                >
+                  <span className="flex items-center gap-2.5 clip-octagon-sm bg-silt px-3.5 py-1.5 text-left hover:bg-basalt">
+                    <svg
+                      width="12"
+                      height="12"
+                      viewBox="0 0 14 14"
+                      aria-hidden="true"
+                    >
+                      <polygon
+                        points="7,1 13,4.5 13,9.5 7,13 1,9.5 1,4.5"
+                        fill="none"
+                        stroke="#2AD4C5"
+                        strokeWidth="1.5"
+                      />
+                    </svg>
+                    <span>
+                      <span className="block font-mono text-[9px] uppercase tracking-[0.18em] text-ash">
+                        Workspace
+                      </span>
+                      <span className="block font-display text-xs font-bold text-chalk">
+                        {me.workspace.name}
+                      </span>
+                    </span>
+                    <svg
+                      width="10"
+                      height="10"
+                      viewBox="0 0 10 10"
+                      className={`ml-1 text-cyan transition-transform ${
+                        workspaceMenuOpen ? "rotate-180" : ""
+                      }`}
+                      aria-hidden="true"
+                    >
+                      <polygon points="1,3 9,3 5,8" fill="currentColor" />
+                    </svg>
+                  </span>
+                </button>
+
+                {workspaceMenuOpen ? (
+                  <div
+                    role="menu"
+                    className="absolute right-0 z-40 mt-2 w-72 shadow-2xl"
+                  >
+                    <GeometricVessel
+                      shape="octagon-sm"
+                      tone="cyan"
+                      innerClassName="p-3 bg-silt"
+                    >
+                      <div className="border-b border-moss pb-2 px-1">
+                        <span className="font-mono text-[10px] uppercase tracking-[0.2em] text-cyan">
+                          Switch Workspace ({me.workspaces.length})
+                        </span>
+                      </div>
+                      <div className="mt-2 space-y-1.5">
+                        {me.workspaces.map((ws) => {
+                          const isCurrent = ws.id === me.workspace.id;
+                          return (
+                            <button
+                              key={ws.id}
+                              type="button"
+                              role="menuitem"
+                              onClick={() => void handleSwitchWorkspace(ws)}
+                              className={`w-full clip-prism-sm px-3.5 py-2 text-left transition-colors flex items-center justify-between gap-2 ${
+                                isCurrent
+                                  ? "bg-basalt text-citron"
+                                  : "bg-olive/70 text-chalk hover:bg-basalt"
+                              }`}
+                            >
+                              <span className="min-w-0">
+                                <span className="block truncate font-display text-xs font-bold">
+                                  {ws.name}
+                                </span>
+                                <span className="block truncate font-mono text-[10px] text-ash">
+                                  {ws.slug}
+                                </span>
+                              </span>
+                              <span className="clip-hex-sm bg-silt px-2.5 py-0.5 font-mono text-[9px] uppercase tracking-wider text-cyan shrink-0">
+                                {ws.role || "member"}
+                              </span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                      <div className="mt-3 border-t border-moss pt-2.5">
+                        <PrismButton
+                          variant="cyan"
+                          size="sm"
+                          className="w-full"
+                          onClick={() => {
+                            setWorkspaceMenuOpen(false);
+                            setNewWorkspaceOpen(true);
+                          }}
+                        >
+                          + New Workspace
+                        </PrismButton>
+                      </div>
+                    </GeometricVessel>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+
+            {/* Signed-In GitHub User Identity & Sign Out */}
+            {mode === "live" && me?.user ? (
+              <div className="clip-octagon-sm bg-moss p-[1px]">
+                <div className="flex items-center gap-2.5 clip-octagon-sm bg-silt px-3 py-1">
+                  <OctagonAvatar
+                    login={me.user.githubLogin}
+                    avatarUrl={me.user.avatarUrl}
+                    size={26}
+                    tone="citron"
+                  />
+                  <span className="font-mono text-xs font-semibold text-chalk">
+                    @{me.user.githubLogin}
+                  </span>
+                </div>
+              </div>
+            ) : mode === "live" && me?.mode === "token" ? (
+              <span className="clip-hex-sm bg-basalt px-3 py-1 font-mono text-[10px] uppercase tracking-wider text-cyan">
+                API Token
+              </span>
+            ) : null}
+
+            {mode === "live" ? (
+              <PrismButton
+                variant="olive"
+                size="sm"
+                disabled={signingOut}
+                onClick={() => void handleSignOut()}
+              >
+                {signingOut ? "Signing out..." : "Sign out"}
+              </PrismButton>
+            ) : null}
+
             {mode === "demo" ? (
               <PrismButton
                 variant="terracotta"
                 size="sm"
                 onClick={handleSimulateCrash}
               >
-                <svg width="10" height="10" viewBox="0 0 12 12" aria-hidden="true">
+                <svg
+                  width="10"
+                  height="10"
+                  viewBox="0 0 12 12"
+                  aria-hidden="true"
+                >
                   <polygon points="6,1 11,10 1,10" fill="currentColor" />
                 </svg>
                 Simulate crash
@@ -465,13 +863,15 @@ export function ControlDeck() {
               </PrismButton>
             )}
 
-            <PrismButton
-              variant="olive"
-              size="sm"
-              onClick={() => setConfigOpen((v) => !v)}
-            >
-              {configOpen ? "Hide engine link" : "Engine link"}
-            </PrismButton>
+            {!showSignInBanner ? (
+              <PrismButton
+                variant="olive"
+                size="sm"
+                onClick={() => setConfigOpen((v) => !v)}
+              >
+                {configOpen ? "Hide engine link" : "Engine link"}
+              </PrismButton>
+            ) : null}
 
             <PrismButton
               variant="citron"
@@ -483,12 +883,21 @@ export function ControlDeck() {
           </div>
         </div>
 
-        {/* Collapsible Engine URL + Bearer Token Configuration */}
+        {/* Collapsible Advanced: Engine URL + Bearer Token Configuration */}
         {configOpen ? (
           <form
             onSubmit={handleSaveEngineConfig}
             className="mt-4 grid gap-3 border-t border-moss pt-4 sm:grid-cols-12 sm:items-end"
           >
+            <div className="sm:col-span-12 flex flex-wrap items-center justify-between gap-2">
+              <span className="font-mono text-[10px] uppercase tracking-[0.2em] text-cyan">
+                Advanced: Engine URL &amp; API Token (CLI and self-hosted)
+              </span>
+              <span className="font-mono text-[10px] text-ash">
+                Saved locally in this browser
+              </span>
+            </div>
+
             <label className="sm:col-span-5 block">
               <span className="font-mono text-[10px] uppercase tracking-wider text-ash">
                 Go Engine URL (NEXT_PUBLIC_ENGINE_URL)
@@ -504,7 +913,7 @@ export function ControlDeck() {
 
             <label className="sm:col-span-5 block">
               <span className="font-mono text-[10px] uppercase tracking-wider text-ash">
-                API Bearer Token
+                API Bearer Token or Session Token
               </span>
               <input
                 type="password"
@@ -548,7 +957,11 @@ export function ControlDeck() {
               ? "All quiet"
               : `${overview.openIncidents} waiting for reply`
           }
-          progress={overview.openIncidents === 0 ? 1 : Math.min(1, overview.openIncidents / 4)}
+          progress={
+            overview.openIncidents === 0
+              ? 1
+              : Math.min(1, overview.openIncidents / 4)
+          }
           color={overview.openIncidents > 0 ? "#E05A33" : "#C9F23D"}
           alert={overview.openIncidents > 0}
         />
@@ -626,9 +1039,7 @@ export function ControlDeck() {
               <button
                 key={proj.id}
                 type="button"
-                onClick={() =>
-                  setSelectedProjectId(isSelected ? "" : proj.id)
-                }
+                onClick={() => setSelectedProjectId(isSelected ? "" : proj.id)}
                 className={`clip-octagon-sm p-[1px] transition-transform hover:-translate-y-0.5 active:scale-[0.99] ${
                   isSelected
                     ? "bg-citron"
@@ -753,6 +1164,13 @@ export function ControlDeck() {
         engineUrl={settings.baseUrl}
         onClose={() => setNewProjectOpen(false)}
         onCreate={handleCreateProject}
+      />
+
+      {/* Inline Polygonal New Workspace Modal */}
+      <NewWorkspaceModal
+        open={newWorkspaceOpen}
+        onClose={() => setNewWorkspaceOpen(false)}
+        onCreate={handleCreateWorkspace}
       />
     </div>
   );

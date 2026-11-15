@@ -7,6 +7,33 @@ export type IncidentAction = "draft_pr" | "replay_all" | "resolve" | "mute";
 export interface HealthResponse {
   ok: boolean;
   uptimeSeconds: number;
+  githubAuthConfigured?: boolean;
+}
+
+export interface AuthUser {
+  id: string;
+  githubLogin: string;
+  name: string;
+  email: string;
+  avatarUrl: string;
+}
+
+export interface WorkspaceSummary {
+  id: string;
+  name: string;
+  slug: string;
+  role: string;
+}
+
+export interface MeResponse {
+  mode: "session" | "token";
+  user: AuthUser | null;
+  workspace: {
+    id: string;
+    name: string;
+    slug: string;
+  };
+  workspaces: WorkspaceSummary[];
 }
 
 export interface Overview {
@@ -66,4 +93,5 @@ export interface Incident {
 export interface EngineSettings {
   baseUrl: string;
   token: string;
+  workspaceId?: string;
 }
