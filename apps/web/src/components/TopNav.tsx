@@ -2,54 +2,21 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { BrandMark } from "./BrandMark";
 
 export function TopNav() {
   const pathname = usePathname();
   const onDeck = pathname?.startsWith("/deck");
+  const onBrand = pathname?.startsWith("/brand");
 
   return (
     <header className="sticky top-0 z-40 border-b border-moss/70 bg-silt/90 backdrop-blur-md">
       <div className="mx-auto flex max-w-7xl items-center justify-between px-5 py-3.5 sm:px-8">
         <Link href="/" className="group flex items-center gap-3.5">
-          <svg
-            width="38"
-            height="38"
-            viewBox="0 0 48 48"
-            className="overflow-visible"
-            aria-hidden="true"
-          >
-            <g className="orbital-cw-slow">
-              <circle
-                cx="24"
-                cy="24"
-                r="21"
-                fill="none"
-                stroke="#C9F23D"
-                strokeWidth="1.3"
-                strokeDasharray="16 8 4 8"
-              />
-              <circle cx="24" cy="3" r="2.6" fill="#C9F23D" />
-            </g>
-            <circle
-              cx="24"
-              cy="24"
-              r="14"
-              fill="#151913"
-              stroke="#2C3527"
-              strokeWidth="1.2"
-            />
-            <polygon
-              points="24,14 33,30 15,30"
-              fill="none"
-              stroke="#E05A33"
-              strokeWidth="2"
-              className="transition-transform duration-300 group-hover:scale-110 svg-origin-center"
-            />
-            <circle cx="24" cy="25" r="2.4" fill="#2AD4C5" />
-          </svg>
+          <BrandMark size={38} animated />
           <div>
             <span className="font-display text-lg font-extrabold tracking-tight text-chalk sm:text-xl">
-              PockDev
+              Pock<span className="text-citron">Dev</span>
             </span>
             <span className="block font-mono text-[10px] uppercase tracking-[0.22em] text-ash">
               Pocket Reliability Shield
@@ -61,12 +28,23 @@ export function TopNav() {
           <Link
             href="/"
             className={`clip-prism-sm px-4 py-1.5 text-xs font-semibold uppercase tracking-wider transition-colors ${
-              !onDeck
+              !onDeck && !onBrand
                 ? "bg-basalt text-citron border-b border-citron"
                 : "text-ash hover:text-chalk hover:bg-olive"
             }`}
           >
             Overview
+          </Link>
+
+          <Link
+            href="/brand"
+            className={`clip-prism-sm px-4 py-1.5 text-xs font-semibold uppercase tracking-wider transition-colors ${
+              onBrand
+                ? "bg-basalt text-citron border-b border-citron"
+                : "text-ash hover:text-chalk hover:bg-olive"
+            }`}
+          >
+            Brand Kit
           </Link>
 
           <Link
