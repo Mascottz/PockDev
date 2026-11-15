@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -154,7 +155,11 @@ func main() {
 	}()
 
 	go func() {
-		log.Printf("pockdev engine listening on :%s (whatsapp_configured=%v)", cfg.Port, rimbra.WhatsAppConfigured())
+		secLast4 := strings.TrimSpace(webhookSecret)
+		if len(secLast4) > 4 {
+			secLast4 = secLast4[len(secLast4)-4:]
+		}
+		log.Printf("pockdev engine listening on :%s (whatsapp_configured=%v webhook_secret_last4=%q)", cfg.Port, rimbra.WhatsAppConfigured(), secLast4)
 		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("http: %v", err)
 		}
