@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="PockDev icon">
+  <title>PockDev</title>
+  <polygon points="156,8 356,8 504,156 504,356 356,504 156,504 8,356 8,156" fill="#C9F23D"/>
+  <polygon points="170,52 342,52 460,170 460,342 342,460 170,460 52,342 52,170" fill="#0C0E0B"/>
+  <polygon points="183,72 329,72 440,183 440,329 329,440 183,440 72,329 72,183" fill="#151913"/>
+  <g>
+    <path d="M 360.2 387.8 A 168 168 0 0 1 151.8 387.8" fill="none" stroke="#C9F23D" stroke-width="26"/>
+    <path d="M 124.2 360.2 A 168 168 0 0 1 124.2 151.8" fill="none" stroke="#C9F23D" stroke-width="26"/>
+    <path d="M 151.8 124.2 A 168 168 0 0 1 360.2 124.2" fill="none" stroke="#C9F23D" stroke-width="26"/>
+    <path d="M 387.8 151.8 A 168 168 0 0 1 387.8 360.2" fill="none" stroke="#C9F23D" stroke-width="26"/>
+    <circle cx="374.8" cy="137.2" r="32" fill="#C9F23D"/>
+  </g>
+  <polygon points="256,103 389,333 123,333" fill="#E05A33"/>
+  <circle cx="256" cy="256" r="56" fill="#0C0E0B"/>
+  <circle cx="256" cy="256" r="44" fill="#2AD4C5"/>
+</svg>
