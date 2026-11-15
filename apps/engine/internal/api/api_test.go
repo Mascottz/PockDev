@@ -293,7 +293,7 @@ func TestCORS(t *testing.T) {
 	a, _, _ := setupAPI(t)
 	mux := http.NewServeMux()
 	a.Register(mux)
-	h := httpx.CORS([]string{"http://localhost:3000"}, mux)
+	h := httpx.CORS([]string{"http://localhost:3000", "https://pockdev.vercel.app"}, mux)
 
 	req := httptest.NewRequest(http.MethodOptions, "/api/overview", nil)
 	req.Header.Set("Origin", "http://localhost:3000")
@@ -307,10 +307,28 @@ func TestCORS(t *testing.T) {
 	}
 
 	req = httptest.NewRequest(http.MethodGet, "/api/overview", nil)
+	req.Header.Set("Origin", "https://pockdev.vercel.app")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Header().Get("Access-Control-Allow-Origin") != "https://pockdev.vercel.app" {
+		t.Fatalf("expected allowed origin, got %q", rec.Header().Get("Access-Control-Allow-Origin"))
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/overview", nil)
 	req.Header.Set("Origin", "https://evil.example")
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Header().Get("Access-Control-Allow-Origin") != "" {
 		t.Fatal("origin should not be allowed")
+	}
+
+	// Default wildcard fallback when no explicit frontend origin is configured.
+	open := httpx.CORS([]string{"http://localhost:3000"}, mux)
+	req = httptest.NewRequest(http.MethodGet, "/api/overview", nil)
+	req.Header.Set("Origin", "https://preview.pockdev.vercel.app")
+	rec = httptest.NewRecorder()
+	open.ServeHTTP(rec, req)
+	if rec.Header().Get("Access-Control-Allow-Origin") != "https://preview.pockdev.vercel.app" {
+		t.Fatalf("wildcard fallback header %q", rec.Header().Get("Access-Control-Allow-Origin"))
 	}
 }

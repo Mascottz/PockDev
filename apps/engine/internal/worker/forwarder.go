@@ -246,3 +246,22 @@ func ReplayAll(ctx context.Context, st store.Store, incidentID string) (int, err
 	}
 	return n, nil
 }
+
+// ReplayProject resets every paused (or failed) delivery belonging to a project.
+func ReplayProject(ctx context.Context, st store.Store, projectID string) (int, error) {
+	paused, err := st.ListDeliveries(ctx, model.DeliveryFilter{ProjectID: projectID, Status: model.DeliveryPaused})
+	if err != nil {
+		return 0, err
+	}
+	failed, err := st.ListDeliveries(ctx, model.DeliveryFilter{ProjectID: projectID, Status: model.DeliveryFailed})
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, d := range append(paused, failed...) {
+		if _, err := Replay(ctx, st, d.ID); err == nil {
+			n++
+		}
+	}
+	return n, nil
+}

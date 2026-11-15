@@ -32,14 +32,19 @@ type Agent struct {
 	started sync.Once
 }
 
+func (a *Agent) logf(format string, args ...any) {
+	if a.Logf != nil {
+		a.Logf(format, args...)
+		return
+	}
+	log.Printf(format, args...)
+}
+
 // Run processes the incident queue until ctx is cancelled.
 func (a *Agent) Run(ctx context.Context) {
 	a.started.Do(func() {
 		a.queue = make(chan string, 32)
 	})
-	if a.Logf == nil {
-		a.Logf = log.Printf
-	}
 	if a.MuteFor <= 0 {
 		a.MuteFor = time.Hour
 	}
@@ -49,7 +54,7 @@ func (a *Agent) Run(ctx context.Context) {
 			return
 		case id := <-a.queue:
 			if err := a.Diagnose(ctx, id); err != nil {
-				a.Logf("agent: diagnose %s: %v", id, err)
+				a.logf("agent: diagnose %s: %v", id, err)
 			}
 		}
 	}
@@ -63,7 +68,7 @@ func (a *Agent) Trigger(incidentID string) {
 	select {
 	case a.queue <- incidentID:
 	default:
-		a.Logf("agent: queue full, incident %s skipped", incidentID)
+		a.logf("agent: queue full, incident %s skipped", incidentID)
 	}
 }
 
@@ -90,7 +95,7 @@ func (a *Agent) Diagnose(ctx context.Context, incidentID string) error {
 				summary = text
 			}
 		} else {
-			a.Logf("agent: llm failed, using fallback summary: %v", err)
+			a.logf("agent: llm failed, using fallback summary: %v", err)
 		}
 	}
 
@@ -115,20 +120,20 @@ func (a *Agent) Diagnose(ctx context.Context, incidentID string) error {
 	if a.Notify != nil {
 		if project.WhatsAppPhone != "" && a.Notify.WhatsAppConfigured() {
 			if err := a.Notify.SendWhatsApp(ctx, project.WhatsAppPhone, message); err != nil {
-				a.Logf("agent: whatsapp alert failed (to=%s): %v", project.WhatsAppPhone, err)
+				a.logf("agent: whatsapp alert failed (to=%s): %v", project.WhatsAppPhone, err)
 			} else {
-				a.Logf("agent: whatsapp alert sent to %s for %s", project.WhatsAppPhone, inc.ID)
+				a.logf("agent: whatsapp alert sent to %s for %s", project.WhatsAppPhone, inc.ID)
 				now := time.Now()
 				inc.LastAlertPhone = "+" + strings.TrimLeft(strings.NewReplacer(" ", "", "-", "").Replace(strings.TrimSpace(project.WhatsAppPhone)), "+")
 				inc.LastAlertAt = &now
 			}
 		} else {
-			a.Logf("agent: whatsapp skipped (project_phone=%q api_configured=%v)", project.WhatsAppPhone, a.Notify.WhatsAppConfigured())
+			a.logf("agent: whatsapp skipped (project_phone=%q api_configured=%v)", project.WhatsAppPhone, a.Notify.WhatsAppConfigured())
 		}
 		if a.Notify.EmailConfigured() {
 			subject := "PockDev alert: " + inc.Title
 			if err := a.Notify.SendEmail(ctx, subject, message); err != nil {
-				a.Logf("agent: email alert failed: %v", err)
+				a.logf("agent: email alert failed: %v", err)
 			}
 		}
 	}
@@ -277,6 +282,8 @@ func extractCodeBlock(s string) string {
 }
 
 // ReplayAll replays every paused or failed delivery tied to the incident.
+// When no deliveries are linked directly (for example, an error-spike incident),
+// it falls back to replaying paused and failed deliveries for the project.
 func (a *Agent) ReplayAll(ctx context.Context, incidentID string) (*model.Incident, int, error) {
 	inc, err := a.Store.GetIncident(ctx, incidentID)
 	if err != nil {
@@ -285,6 +292,12 @@ func (a *Agent) ReplayAll(ctx context.Context, incidentID string) (*model.Incide
 	n, err := worker.ReplayAll(ctx, a.Store, incidentID)
 	if err != nil {
 		return nil, 0, err
+	}
+	if n == 0 && inc.ProjectID != "" {
+		n, err = worker.ReplayProject(ctx, a.Store, inc.ProjectID)
+		if err != nil {
+			return nil, 0, err
+		}
 	}
 	inc.PausedCount = 0
 	inc.LastSeenAt = time.Now()

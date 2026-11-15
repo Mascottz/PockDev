@@ -45,38 +45,58 @@ func seedIncident(t *testing.T, st *memstore.Mem) *model.Incident {
 	return inc
 }
 
+type mockWhatsAppReq struct {
+	Channel string `json:"channel"`
+	To      string `json:"to"`
+	Content struct {
+		Text string `json:"text"`
+	} `json:"content"`
+}
+
 func TestDiagnoseAlertsWithFallback(t *testing.T) {
 	st := memstore.New()
 	seedIncident(t, st)
 
-	var whatsappBody map[string]string
+	var whatsappBody mockWhatsAppReq
+	var emailBody struct {
+		Subject string `json:"subject"`
+		Text    string `json:"text"`
+	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer rimbra-key" {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
-		_ = json.NewDecoder(r.Body).Decode(&whatsappBody)
+		switch r.URL.Path {
+		case "/whatsapp":
+			_ = json.NewDecoder(r.Body).Decode(&whatsappBody)
+		case "/email":
+			_ = json.NewDecoder(r.Body).Decode(&emailBody)
+		}
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
 
 	a := &Agent{
 		Store:  st,
-		Notify: &notify.Client{APIKey: "rimbra-key", WhatsAppURL: srv.URL, EmailURL: srv.URL},
+		Notify: &notify.Client{APIKey: "rimbra-key", WhatsAppURL: srv.URL + "/whatsapp", EmailURL: srv.URL + "/email"},
 	}
 	if err := a.Diagnose(context.Background(), "inc_1"); err != nil {
 		t.Fatal(err)
 	}
 
-	if whatsappBody["to"] != "+234801" {
-		t.Fatalf("to %v", whatsappBody)
+	if whatsappBody.Channel != "whatsapp" || whatsappBody.To != "+234801" {
+		t.Fatalf("whatsapp %+v", whatsappBody)
 	}
-	msg := whatsappBody["message"]
+	msg := whatsappBody.Content.Text
 	if !strings.Contains(msg, "orders-api") || !strings.Contains(msg, "2 webhooks are safely paused") {
 		t.Fatalf("message %q", msg)
 	}
 	if !strings.Contains(msg, "Reply 1 to open a fix PR, 2 to replay paused webhooks, or 3 to mute for 1 hour.") {
 		t.Fatalf("menu missing: %q", msg)
+	}
+	if !strings.Contains(emailBody.Subject, "Cannot read rider.phone") || !strings.Contains(emailBody.Text, "orders-api") {
+		t.Fatalf("email %+v", emailBody)
 	}
 
 	inc, err := st.GetIncident(context.Background(), "inc_1")
@@ -104,11 +124,9 @@ func TestDiagnoseUsesLLM(t *testing.T) {
 	}))
 	defer llm.Close()
 
-	var msg string
+	var wa mockWhatsAppReq
 	notifySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var body map[string]string
-		_ = json.NewDecoder(r.Body).Decode(&body)
-		msg = body["message"]
+		_ = json.NewDecoder(r.Body).Decode(&wa)
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer notifySrv.Close()
@@ -121,8 +139,11 @@ func TestDiagnoseUsesLLM(t *testing.T) {
 	if err := a.Diagnose(context.Background(), "inc_1"); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(msg, "rider phone number") {
-		t.Fatalf("llm summary missing: %q", msg)
+	if wa.Channel != "whatsapp" || wa.To != "+234801" {
+		t.Fatalf("whatsapp envelope %+v", wa)
+	}
+	if !strings.Contains(wa.Content.Text, "rider phone number") {
+		t.Fatalf("llm summary missing: %q", wa.Content.Text)
 	}
 }
 
@@ -157,6 +178,64 @@ func TestReplayAllAction(t *testing.T) {
 	}
 	if n != 2 || inc.PausedCount != 0 {
 		t.Fatalf("replay %d %+v", n, inc)
+	}
+}
+
+func TestReplayAllFallsBackToProject(t *testing.T) {
+	st := memstore.New()
+	now := time.Now()
+	_ = st.CreateProject(context.Background(), &model.Project{
+		ID: "prj_spike", Name: "checkout-api", Slug: "checkout-api",
+		EndpointKey: "ek_s", SDKKey: "pk_s", Status: "active", CreatedAt: now,
+	})
+	_ = st.CreateProject(context.Background(), &model.Project{
+		ID: "prj_other", Name: "other-api", Slug: "other-api",
+		EndpointKey: "ek_o", SDKKey: "pk_o", Status: "active", CreatedAt: now,
+	})
+	_ = st.CreateIncident(context.Background(), &model.Incident{
+		ID: "inc_spike", ProjectID: "prj_spike", Title: "TypeError on checkout",
+		FilePath: "src/checkout.ts", Origin: model.OriginErrorSpike,
+		Status: model.IncidentOpen, LastSeenAt: now, CreatedAt: now,
+	})
+	// Deliveries belong to prj_spike but are not linked directly to inc_spike.
+	_ = st.CreateDelivery(context.Background(), &model.Delivery{
+		ID: "dlv_s1", ProjectID: "prj_spike", Status: model.DeliveryPaused,
+		StorageKey: "k1", CreatedAt: now,
+	})
+	_ = st.CreateDelivery(context.Background(), &model.Delivery{
+		ID: "dlv_s2", ProjectID: "prj_spike", Status: model.DeliveryFailed,
+		StorageKey: "k2", CreatedAt: now,
+	})
+	_ = st.CreateDelivery(context.Background(), &model.Delivery{
+		ID: "dlv_s3", ProjectID: "prj_spike", Status: model.DeliveryDelivered,
+		StorageKey: "k3", CreatedAt: now,
+	})
+	_ = st.CreateDelivery(context.Background(), &model.Delivery{
+		ID: "dlv_other", ProjectID: "prj_other", Status: model.DeliveryPaused,
+		StorageKey: "k4", CreatedAt: now,
+	})
+
+	a := &Agent{Store: st}
+	inc, n, err := a.ReplayAll(context.Background(), "inc_spike")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 || inc.PausedCount != 0 {
+		t.Fatalf("fallback replay n=%d inc=%+v", n, inc)
+	}
+	for _, id := range []string{"dlv_s1", "dlv_s2"} {
+		d, _ := st.GetDelivery(context.Background(), id)
+		if d.Status != model.DeliveryRetrying {
+			t.Fatalf("%s status %s, want retrying", id, d.Status)
+		}
+	}
+	delivered, _ := st.GetDelivery(context.Background(), "dlv_s3")
+	if delivered.Status != model.DeliveryDelivered {
+		t.Fatalf("dlv_s3 status changed to %s", delivered.Status)
+	}
+	other, _ := st.GetDelivery(context.Background(), "dlv_other")
+	if other.Status != model.DeliveryPaused {
+		t.Fatalf("dlv_other status changed to %s", other.Status)
 	}
 }
 

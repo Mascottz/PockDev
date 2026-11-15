@@ -9,15 +9,32 @@ import (
 )
 
 func TestSendWhatsAppAndEmail(t *testing.T) {
-	type rec struct {
-		path, auth string
-		payload    map[string]string
+	type whatsappPayload struct {
+		Channel string `json:"channel"`
+		To      string `json:"to"`
+		Content struct {
+			Text string `json:"text"`
+		} `json:"content"`
 	}
-	var got []rec
+	type emailPayload struct {
+		Subject string `json:"subject"`
+		Text    string `json:"text"`
+	}
+	var (
+		gotWA    whatsappPayload
+		gotEmail emailPayload
+		paths    []string
+		auths    []string
+	)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var payload map[string]string
-		_ = json.NewDecoder(r.Body).Decode(&payload)
-		got = append(got, rec{path: r.URL.Path, auth: r.Header.Get("Authorization"), payload: payload})
+		paths = append(paths, r.URL.Path)
+		auths = append(auths, r.Header.Get("Authorization"))
+		switch r.URL.Path {
+		case "/whatsapp":
+			_ = json.NewDecoder(r.Body).Decode(&gotWA)
+		case "/email":
+			_ = json.NewDecoder(r.Body).Decode(&gotEmail)
+		}
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
@@ -26,24 +43,24 @@ func TestSendWhatsAppAndEmail(t *testing.T) {
 	if !c.WhatsAppConfigured() || !c.EmailConfigured() {
 		t.Fatal("should be configured")
 	}
-	if err := c.SendWhatsApp(context.Background(), "+234", "hello"); err != nil {
+	if err := c.SendWhatsApp(context.Background(), "234", "hello"); err != nil {
 		t.Fatal(err)
 	}
 	if err := c.SendEmail(context.Background(), "subj", "body"); err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 2 {
-		t.Fatalf("got %v", got)
+	if len(paths) != 2 || paths[0] != "/whatsapp" || paths[1] != "/email" {
+		t.Fatalf("paths %v", paths)
 	}
-	if got[0].path != "/whatsapp" || got[0].payload["to"] != "+234" || got[0].payload["message"] != "hello" {
-		t.Fatalf("whatsapp %v", got[0])
+	if gotWA.Channel != "whatsapp" || gotWA.To != "+234" || gotWA.Content.Text != "hello" {
+		t.Fatalf("whatsapp %+v", gotWA)
 	}
-	if got[1].path != "/email" || got[1].payload["subject"] != "subj" || got[1].payload["text"] != "body" {
-		t.Fatalf("email %v", got[1])
+	if gotEmail.Subject != "subj" || gotEmail.Text != "body" {
+		t.Fatalf("email %+v", gotEmail)
 	}
-	for _, r := range got {
-		if r.auth != "Bearer rk" {
-			t.Fatalf("auth %q", r.auth)
+	for _, auth := range auths {
+		if auth != "Bearer rk" {
+			t.Fatalf("auth %q", auth)
 		}
 	}
 }

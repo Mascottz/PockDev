@@ -182,6 +182,43 @@ func TestReplayAllCountsPaused(t *testing.T) {
 	}
 }
 
+func TestReplayProjectCountsPausedAndFailed(t *testing.T) {
+	st := memstore.New()
+	now := time.Now()
+	entries := []struct {
+		id, projectID, status string
+	}{
+		{"dlv_p1", "prj_1", model.DeliveryPaused},
+		{"dlv_p2", "prj_1", model.DeliveryFailed},
+		{"dlv_p3", "prj_1", model.DeliveryDelivered},
+		{"dlv_other", "prj_2", model.DeliveryPaused},
+	}
+	for _, e := range entries {
+		if err := st.CreateDelivery(context.Background(), &model.Delivery{
+			ID: e.id, ProjectID: e.projectID, Status: e.status, CreatedAt: now,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	n, err := ReplayProject(context.Background(), st, "prj_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Fatalf("replayed %d, want 2", n)
+	}
+	for _, id := range []string{"dlv_p1", "dlv_p2"} {
+		d, _ := st.GetDelivery(context.Background(), id)
+		if d.Status != model.DeliveryRetrying {
+			t.Fatalf("%s status %s, want retrying", id, d.Status)
+		}
+	}
+	other, _ := st.GetDelivery(context.Background(), "dlv_other")
+	if other.Status != model.DeliveryPaused {
+		t.Fatalf("other project delivery changed to %s", other.Status)
+	}
+}
+
 func TestBackoffGrowsAndCaps(t *testing.T) {
 	f := &Forwarder{RetryBase: time.Second, MaxBackoff: 8 * time.Second}
 	if got := f.backoff(1); got != time.Second {
