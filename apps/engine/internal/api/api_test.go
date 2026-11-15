@@ -161,6 +161,10 @@ func TestProjectLifecycle(t *testing.T) {
 func TestDeliveriesAndReplay(t *testing.T) {
 	a, st, _ := setupAPI(t)
 	h := mounted(a)
+	_ = st.CreateProject(context.Background(), &model.Project{
+		ID: "prj_1", Name: "n", Slug: "n", EndpointKey: "e", SDKKey: "s",
+		Status: "active", CreatedAt: time.Now(),
+	})
 	_ = st.CreateDelivery(context.Background(), &model.Delivery{
 		ID: "d1", ProjectID: "prj_1", Status: model.DeliveryPaused,
 		AttemptCount: 8, PayloadPreview: `{"a":1}`, CreatedAt: time.Now(),
@@ -205,6 +209,10 @@ func TestIncidentActions(t *testing.T) {
 	a, st, _ := setupAPI(t)
 	h := mounted(a)
 	now := time.Now()
+	_ = st.CreateProject(context.Background(), &model.Project{
+		ID: "prj_1", Name: "n", Slug: "n", EndpointKey: "e", SDKKey: "s",
+		Status: "active", CreatedAt: now,
+	})
 	_ = st.CreateIncident(context.Background(), &model.Incident{
 		ID: "i1", ProjectID: "prj_1", Title: "Crash in orders", Status: model.IncidentOpen,
 		LastSeenAt: now, CreatedAt: now,

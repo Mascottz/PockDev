@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/Mascottz/PockDev/apps/engine/internal/id"
 	"github.com/Mascottz/PockDev/apps/engine/internal/model"
 	"github.com/Mascottz/PockDev/apps/engine/internal/store"
 )
@@ -27,21 +28,44 @@ func New(pool *pgxpool.Pool) *Store {
 
 var _ store.Store = (*Store)(nil)
 
-// ErrNotFound is returned when a row does not exist.
-var ErrNotFound = errors.New("not found")
+// ErrNotFound is returned when a row does not exist. It is the shared store
+// sentinel so callers can use errors.Is across implementations.
+var ErrNotFound = store.ErrNotFound
+
+const projectCols = `id, workspace_id, name, slug, endpoint_key, sdk_key, target_url, github_repo, whatsapp_phone, status, created_at`
+
+func scanProject(row pgx.Row) (*model.Project, error) {
+	var p model.Project
+	err := row.Scan(&p.ID, &p.WorkspaceID, &p.Name, &p.Slug, &p.EndpointKey, &p.SDKKey, &p.TargetURL,
+		&p.GitHubRepo, &p.WhatsAppPhone, &p.Status, &p.CreatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &p, nil
+}
+
+func projectArgs(p *model.Project) []any {
+	if p.WorkspaceID == "" {
+		p.WorkspaceID = store.DefaultWorkspaceID
+	}
+	return []any{p.ID, p.WorkspaceID, p.Name, p.Slug, p.EndpointKey, p.SDKKey, p.TargetURL,
+		p.GitHubRepo, p.WhatsAppPhone, p.Status, p.CreatedAt}
+}
 
 func (s *Store) CreateProject(ctx context.Context, p *model.Project) error {
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO projects (id, name, slug, endpoint_key, sdk_key, target_url, github_repo, whatsapp_phone, status, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-		p.ID, p.Name, p.Slug, p.EndpointKey, p.SDKKey, p.TargetURL, p.GitHubRepo, p.WhatsAppPhone, p.Status, p.CreatedAt)
+		INSERT INTO projects (`+projectCols+`)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`, projectArgs(p)...)
 	return err
 }
 
-func (s *Store) ListProjects(ctx context.Context) ([]model.Project, error) {
+func (s *Store) ListProjects(ctx context.Context, workspaceID string) ([]model.Project, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT id, name, slug, endpoint_key, sdk_key, target_url, github_repo, whatsapp_phone, status, created_at
-		FROM projects ORDER BY created_at ASC`)
+		SELECT `+projectCols+`
+		FROM projects WHERE workspace_id = $1 ORDER BY created_at ASC`, workspaceID)
 	if err != nil {
 		return nil, err
 	}
@@ -49,7 +73,7 @@ func (s *Store) ListProjects(ctx context.Context) ([]model.Project, error) {
 	out := []model.Project{}
 	for rows.Next() {
 		var p model.Project
-		if err := rows.Scan(&p.ID, &p.Name, &p.Slug, &p.EndpointKey, &p.SDKKey, &p.TargetURL,
+		if err := rows.Scan(&p.ID, &p.WorkspaceID, &p.Name, &p.Slug, &p.EndpointKey, &p.SDKKey, &p.TargetURL,
 			&p.GitHubRepo, &p.WhatsAppPhone, &p.Status, &p.CreatedAt); err != nil {
 			return nil, err
 		}
@@ -71,19 +95,7 @@ func (s *Store) GetProjectBySDKKey(ctx context.Context, key string) (*model.Proj
 }
 
 func (s *Store) oneProject(ctx context.Context, where, arg string) (*model.Project, error) {
-	var p model.Project
-	err := s.pool.QueryRow(ctx, `
-		SELECT id, name, slug, endpoint_key, sdk_key, target_url, github_repo, whatsapp_phone, status, created_at
-		FROM projects `+where, arg).
-		Scan(&p.ID, &p.Name, &p.Slug, &p.EndpointKey, &p.SDKKey, &p.TargetURL,
-			&p.GitHubRepo, &p.WhatsAppPhone, &p.Status, &p.CreatedAt)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrNotFound
-	}
-	if err != nil {
-		return nil, err
-	}
-	return &p, nil
+	return scanProject(s.pool.QueryRow(ctx, `SELECT `+projectCols+` FROM projects `+where, arg))
 }
 
 const deliveryCols = `id, project_id, endpoint_key, status, http_status, attempt_count, schema_drift_note,
@@ -178,6 +190,10 @@ func (s *Store) ListDeliveries(ctx context.Context, f model.DeliveryFilter) ([]m
 	if f.ProjectID != "" {
 		args = append(args, f.ProjectID)
 		query += fmt.Sprintf(` AND project_id = $%d`, len(args))
+	}
+	if f.WorkspaceID != "" {
+		args = append(args, f.WorkspaceID)
+		query += fmt.Sprintf(` AND project_id IN (SELECT id FROM projects WHERE workspace_id = $%d)`, len(args))
 	}
 	if f.Status != "" {
 		args = append(args, f.Status)
@@ -325,6 +341,10 @@ func (s *Store) ListIncidents(ctx context.Context, f model.IncidentFilter) ([]mo
 	if f.ProjectID != "" {
 		args = append(args, f.ProjectID)
 		query += fmt.Sprintf(` AND project_id = $%d`, len(args))
+	}
+	if f.WorkspaceID != "" {
+		args = append(args, f.WorkspaceID)
+		query += fmt.Sprintf(` AND project_id IN (SELECT id FROM projects WHERE workspace_id = $%d)`, len(args))
 	}
 	if f.AlertPhone != "" {
 		args = append(args, f.AlertPhone)
@@ -529,19 +549,25 @@ func (s *Store) oneErrorEvent(ctx context.Context, tail, arg string) (*model.Err
 	return &ev, nil
 }
 
-func (s *Store) Overview(ctx context.Context, now time.Time) (store.Overview, error) {
+func (s *Store) Overview(ctx context.Context, workspaceID string, now time.Time) (store.Overview, error) {
 	var o store.Overview
 	dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
 
-	err := s.pool.QueryRow(ctx, `SELECT count(*) FROM projects`).Scan(&o.ProjectsCount)
+	err := s.pool.QueryRow(ctx, `SELECT count(*) FROM projects WHERE workspace_id = $1`, workspaceID).Scan(&o.ProjectsCount)
 	if err != nil {
 		return o, err
 	}
-	err = s.pool.QueryRow(ctx, `SELECT count(*) FROM incidents WHERE status = 'open'`).Scan(&o.OpenIncidents)
+	err = s.pool.QueryRow(ctx, `
+		SELECT count(*) FROM incidents
+		WHERE status = 'open' AND project_id IN (SELECT id FROM projects WHERE workspace_id = $1)`,
+		workspaceID).Scan(&o.OpenIncidents)
 	if err != nil {
 		return o, err
 	}
-	err = s.pool.QueryRow(ctx, `SELECT count(*) FROM deliveries WHERE status = 'paused'`).Scan(&o.PausedDeliveries)
+	err = s.pool.QueryRow(ctx, `
+		SELECT count(*) FROM deliveries
+		WHERE status = 'paused' AND project_id IN (SELECT id FROM projects WHERE workspace_id = $1)`,
+		workspaceID).Scan(&o.PausedDeliveries)
 	if err != nil {
 		return o, err
 	}
@@ -550,11 +576,16 @@ func (s *Store) Overview(ctx context.Context, now time.Time) (store.Overview, er
 	err = s.pool.QueryRow(ctx, `
 		SELECT count(*) FILTER (WHERE status = 'delivered'),
 		       count(*) FILTER (WHERE status IN ('delivered', 'paused', 'failed'))
-		FROM deliveries WHERE created_at >= $1`, dayStart).Scan(&delivered, &finished)
+		FROM deliveries
+		WHERE created_at >= $1 AND project_id IN (SELECT id FROM projects WHERE workspace_id = $2)`,
+		dayStart, workspaceID).Scan(&delivered, &finished)
 	if err != nil {
 		return o, err
 	}
-	err = s.pool.QueryRow(ctx, `SELECT count(*) FROM deliveries WHERE created_at >= $1`, dayStart).Scan(&o.CaughtToday)
+	err = s.pool.QueryRow(ctx, `
+		SELECT count(*) FROM deliveries
+		WHERE created_at >= $1 AND project_id IN (SELECT id FROM projects WHERE workspace_id = $2)`,
+		dayStart, workspaceID).Scan(&o.CaughtToday)
 	if err != nil {
 		return o, err
 	}
@@ -564,4 +595,236 @@ func (s *Store) Overview(ctx context.Context, now time.Time) (store.Overview, er
 		o.HealthyRate = float64(delivered*1000/finished) / 10
 	}
 	return o, nil
+}
+
+const workspaceCols = `id, name, slug, owner_user_id, created_at`
+
+func scanWorkspace(row pgx.Row) (*model.Workspace, error) {
+	var w model.Workspace
+	err := row.Scan(&w.ID, &w.Name, &w.Slug, &w.OwnerUserID, &w.CreatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &w, nil
+}
+
+const userCols = `id, github_id, github_login, name, email, avatar_url, default_workspace_id, created_at`
+
+func scanUser(row pgx.Row) (*model.User, error) {
+	var u model.User
+	err := row.Scan(&u.ID, &u.GitHubID, &u.GitHubLogin, &u.Name, &u.Email, &u.AvatarURL,
+		&u.DefaultWorkspaceID, &u.CreatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &u, nil
+}
+
+func (s *Store) UpsertGitHubUser(ctx context.Context, ghID int64, login, name, email, avatarURL string, claimDefault bool) (*model.User, *model.Workspace, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer tx.Rollback(ctx)
+
+	u, err := scanUser(tx.QueryRow(ctx, `SELECT `+userCols+` FROM users WHERE github_id = $1`, ghID))
+	if errors.Is(err, ErrNotFound) {
+		userID := id.New("usr_", 16)
+		var wsp *model.Workspace
+		if claimDefault {
+			wsp, err = scanWorkspace(tx.QueryRow(ctx, `
+				UPDATE workspaces SET owner_user_id = $2,
+					name = CASE WHEN name = 'Default Workspace' THEN $3 ELSE name END
+				WHERE id = $1 AND owner_user_id = ''
+				RETURNING `+workspaceCols, store.DefaultWorkspaceID, userID, login+" Workspace"))
+			if err != nil && !errors.Is(err, ErrNotFound) {
+				return nil, nil, err
+			}
+		}
+		if wsp == nil {
+			wsp, err = insertWorkspaceTx(ctx, tx, userID, login+" Workspace", uniqueWorkspaceSlug(ctx, tx, login))
+			if err != nil {
+				return nil, nil, err
+			}
+		}
+		_, err = tx.Exec(ctx, `
+			INSERT INTO users (`+userCols+`)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+			userID, ghID, login, name, email, avatarURL, wsp.ID, time.Now())
+		if err != nil {
+			return nil, nil, err
+		}
+		_, err = tx.Exec(ctx, `
+			INSERT INTO workspace_members (workspace_id, user_id, role, created_at)
+			VALUES ($1, $2, 'owner', $3)`, wsp.ID, userID, time.Now())
+		if err != nil {
+			return nil, nil, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return nil, nil, err
+		}
+		u = &model.User{
+			ID: userID, GitHubID: ghID, GitHubLogin: login, Name: name, Email: email,
+			AvatarURL: avatarURL, DefaultWorkspaceID: wsp.ID,
+		}
+		return u, wsp, nil
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+
+	_, err = tx.Exec(ctx, `
+		UPDATE users SET github_login = $2, name = $3, email = $4, avatar_url = $5
+		WHERE id = $1`, u.ID, login, name, email, avatarURL)
+	if err != nil {
+		return nil, nil, err
+	}
+	u.GitHubLogin = login
+	u.Name = name
+	u.Email = email
+	u.AvatarURL = avatarURL
+	wsp, err := scanWorkspace(tx.QueryRow(ctx, `SELECT `+workspaceCols+` FROM workspaces WHERE id = $1`, u.DefaultWorkspaceID))
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, nil, err
+	}
+	return u, wsp, nil
+}
+
+func insertWorkspaceTx(ctx context.Context, tx pgx.Tx, ownerUserID, name, slug string) (*model.Workspace, error) {
+	w := &model.Workspace{
+		ID:          id.New("wsp_", 16),
+		Name:        name,
+		Slug:        slug,
+		OwnerUserID: ownerUserID,
+		CreatedAt:   time.Now(),
+	}
+	_, err := tx.Exec(ctx, `
+		INSERT INTO workspaces (`+workspaceCols+`)
+		VALUES ($1, $2, $3, $4, $5)`, w.ID, w.Name, w.Slug, w.OwnerUserID, w.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return w, nil
+}
+
+// uniqueWorkspaceSlug finds a free slug derived from the GitHub login.
+func uniqueWorkspaceSlug(ctx context.Context, tx pgx.Tx, login string) string {
+	base := store.Slugify(login)
+	if base == "" {
+		base = "user"
+	}
+	slug := base
+	for i := 0; i < 5; i++ {
+		var taken int
+		err := tx.QueryRow(ctx, `SELECT count(*) FROM workspaces WHERE slug = $1`, slug).Scan(&taken)
+		if err == nil && taken == 0 {
+			return slug
+		}
+		slug = base + "-" + id.Token(4)
+	}
+	return base + "-" + id.Token(8)
+}
+
+func (s *Store) ListUserWorkspaces(ctx context.Context, userID string) ([]model.WorkspaceSummary, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT w.id, w.name, w.slug, m.role
+		FROM workspace_members m
+		JOIN workspaces w ON w.id = m.workspace_id
+		WHERE m.user_id = $1
+		ORDER BY w.created_at ASC`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []model.WorkspaceSummary{}
+	for rows.Next() {
+		var w model.WorkspaceSummary
+		if err := rows.Scan(&w.ID, &w.Name, &w.Slug, &w.Role); err != nil {
+			return nil, err
+		}
+		out = append(out, w)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) GetWorkspace(ctx context.Context, id string) (*model.Workspace, error) {
+	return scanWorkspace(s.pool.QueryRow(ctx, `SELECT `+workspaceCols+` FROM workspaces WHERE id = $1`, id))
+}
+
+func (s *Store) CreateWorkspace(ctx context.Context, userID, name, slug string) (*model.Workspace, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	if slug == "" {
+		slug = store.Slugify(name)
+	}
+	w, err := insertWorkspaceTx(ctx, tx, userID, name, slug)
+	if err != nil {
+		return nil, err
+	}
+	_, err = tx.Exec(ctx, `
+		INSERT INTO workspace_members (workspace_id, user_id, role, created_at)
+		VALUES ($1, $2, 'owner', $3)`, w.ID, userID, time.Now())
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return w, nil
+}
+
+func (s *Store) UserHasWorkspace(ctx context.Context, userID, workspaceID string) (bool, error) {
+	var n int
+	err := s.pool.QueryRow(ctx, `
+		SELECT count(*) FROM workspace_members
+		WHERE user_id = $1 AND workspace_id = $2`, userID, workspaceID).Scan(&n)
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+func (s *Store) CreateSession(ctx context.Context, sess *model.Session) error {
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO sessions (token_hash, user_id, workspace_id, expires_at, created_at)
+		VALUES ($1, $2, $3, $4, $5)`,
+		sess.TokenHash, sess.UserID, sess.WorkspaceID, sess.ExpiresAt, sess.CreatedAt)
+	return err
+}
+
+func (s *Store) GetSession(ctx context.Context, tokenHash string, now time.Time) (*model.Session, *model.User, error) {
+	var sess model.Session
+	var u model.User
+	err := s.pool.QueryRow(ctx, `
+		SELECT s.token_hash, s.user_id, s.workspace_id, s.expires_at, s.created_at,
+			u.id, u.github_id, u.github_login, u.name, u.email, u.avatar_url, u.default_workspace_id, u.created_at
+		FROM sessions s
+		JOIN users u ON u.id = s.user_id
+		WHERE s.token_hash = $1 AND s.expires_at > $2`, tokenHash, now).
+		Scan(&sess.TokenHash, &sess.UserID, &sess.WorkspaceID, &sess.ExpiresAt, &sess.CreatedAt,
+			&u.ID, &u.GitHubID, &u.GitHubLogin, &u.Name, &u.Email, &u.AvatarURL, &u.DefaultWorkspaceID, &u.CreatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	return &sess, &u, nil
+}
+
+func (s *Store) DeleteSession(ctx context.Context, tokenHash string) error {
+	_, err := s.pool.Exec(ctx, `DELETE FROM sessions WHERE token_hash = $1`, tokenHash)
+	return err
 }

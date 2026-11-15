@@ -2,10 +2,15 @@ package store
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"time"
 
 	"github.com/Mascottz/PockDev/apps/engine/internal/model"
 )
+
+// ErrNotFound is returned when a row does not exist (or a session expired).
+var ErrNotFound = errors.New("not found")
 
 // Overview holds the dashboard overview numbers.
 type Overview struct {
@@ -16,12 +21,34 @@ type Overview struct {
 	HealthyRate      float64 `json:"healthyRate"`
 }
 
+// DefaultWorkspaceID is the seeded workspace that owns rows predating
+// multi-tenancy.
+const DefaultWorkspaceID = "wsp_default"
+
+// Slugify turns a name or login into a URL safe slug.
+func Slugify(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	var b strings.Builder
+	dash := false
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			dash = false
+		} else if !dash && b.Len() > 0 {
+			b.WriteByte('-')
+			dash = true
+		}
+	}
+	return strings.Trim(b.String(), "-")
+}
+
 // Store is the engine's data access boundary. The Postgres implementation is
 // used in production; tests use the in-memory one.
 type Store interface {
 	// Projects
 	CreateProject(ctx context.Context, p *model.Project) error
-	ListProjects(ctx context.Context) ([]model.Project, error)
+	// ListProjects returns only the projects owned by workspaceID.
+	ListProjects(ctx context.Context, workspaceID string) ([]model.Project, error)
 	GetProject(ctx context.Context, id string) (*model.Project, error)
 	GetProjectByEndpointKey(ctx context.Context, key string) (*model.Project, error)
 	GetProjectBySDKKey(ctx context.Context, key string) (*model.Project, error)
@@ -30,9 +57,11 @@ type Store interface {
 	CreateDelivery(ctx context.Context, d *model.Delivery) error
 	GetDelivery(ctx context.Context, id string) (*model.Delivery, error)
 	UpdateDelivery(ctx context.Context, d *model.Delivery) error
+	// ListDeliveries filters deliveries. When f.WorkspaceID is set only
+	// deliveries whose project lives in that workspace are returned.
 	ListDeliveries(ctx context.Context, f model.DeliveryFilter) ([]model.Delivery, error)
 	// ClaimDueDeliveries leases due retrying deliveries so exactly one worker
-	// handles them at a time.
+	// handles them at a time. It sweeps every workspace.
 	ClaimDueDeliveries(ctx context.Context, now time.Time, lease time.Duration, limit int) ([]model.Delivery, error)
 	// RecentDeliveredKeys returns payload key lists of recent healthy
 	// deliveries for schema drift comparison.
@@ -41,6 +70,8 @@ type Store interface {
 	// Incidents
 	CreateIncident(ctx context.Context, i *model.Incident) error
 	GetIncident(ctx context.Context, id string) (*model.Incident, error)
+	// ListIncidents filters incidents. When f.WorkspaceID is set only
+	// incidents whose project lives in that workspace are returned.
 	ListIncidents(ctx context.Context, f model.IncidentFilter) ([]model.Incident, error)
 	UpdateIncident(ctx context.Context, i *model.Incident) error
 	// ExpireMutes flips muted incidents back to open after their mute window.
@@ -58,6 +89,30 @@ type Store interface {
 	GetErrorGroupByFingerprint(ctx context.Context, projectID, fingerprint string) (*model.ErrorGroup, error)
 	UpdateErrorGroup(ctx context.Context, g *model.ErrorGroup) error
 
-	// Overview aggregates the dashboard numbers.
-	Overview(ctx context.Context, now time.Time) (Overview, error)
+	// Overview aggregates the dashboard numbers for one workspace only.
+	Overview(ctx context.Context, workspaceID string, now time.Time) (Overview, error)
+
+	// Auth and workspaces
+
+	// UpsertGitHubUser signs in a GitHub account. Existing users get their
+	// profile refreshed. New users get a workspace: when claimDefault is true
+	// and the seeded default workspace has no owner they take it over,
+	// otherwise a fresh workspace is created from their login.
+	UpsertGitHubUser(ctx context.Context, ghID int64, login, name, email, avatarURL string, claimDefault bool) (*model.User, *model.Workspace, error)
+	// ListUserWorkspaces returns every workspace the user belongs to.
+	ListUserWorkspaces(ctx context.Context, userID string) ([]model.WorkspaceSummary, error)
+	// GetWorkspace loads one workspace by id.
+	GetWorkspace(ctx context.Context, id string) (*model.Workspace, error)
+	// CreateWorkspace creates a workspace owned by userID and adds the owner
+	// membership row.
+	CreateWorkspace(ctx context.Context, userID, name, slug string) (*model.Workspace, error)
+	// UserHasWorkspace reports whether the user is a member of the workspace.
+	UserHasWorkspace(ctx context.Context, userID, workspaceID string) (bool, error)
+	// CreateSession stores a session by its SHA-256 token hash.
+	CreateSession(ctx context.Context, sess *model.Session) error
+	// GetSession loads a session and its user, or ErrNotFound when the hash is
+	// unknown or the session expired before now.
+	GetSession(ctx context.Context, tokenHash string, now time.Time) (*model.Session, *model.User, error)
+	// DeleteSession removes a session by token hash.
+	DeleteSession(ctx context.Context, tokenHash string) error
 }

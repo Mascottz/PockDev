@@ -9,13 +9,19 @@ import (
 )
 
 func TestSchemaIsIdempotentDDL(t *testing.T) {
-	for _, table := range []string{"projects", "deliveries", "incidents", "error_groups", "error_events"} {
+	for _, table := range []string{"projects", "deliveries", "incidents", "error_groups", "error_events",
+		"workspaces", "users", "workspace_members", "sessions"} {
 		if !strings.Contains(schemaSQL, "CREATE TABLE IF NOT EXISTS "+table) {
 			t.Fatalf("missing idempotent DDL for %s", table)
 		}
 	}
-	if strings.Contains(schemaSQL, "DROP ") {
-		t.Fatal("schema must not drop anything")
+	// The Stage 2 migration must keep existing Stage 1 rows, so the one legal
+	// drop is the old global unique slug constraint (replaced by a per
+	// workspace unique index). Everything else must stay untouched.
+	for _, line := range strings.Split(schemaSQL, "\n") {
+		if strings.Contains(line, "DROP ") && !strings.Contains(line, "DROP CONSTRAINT IF EXISTS projects_slug_key") {
+			t.Fatalf("schema must not drop anything beyond the slug constraint: %s", line)
+		}
 	}
 }
 

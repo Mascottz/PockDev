@@ -15,6 +15,7 @@ import (
 
 	"github.com/Mascottz/PockDev/apps/engine/internal/agent"
 	"github.com/Mascottz/PockDev/apps/engine/internal/api"
+	"github.com/Mascottz/PockDev/apps/engine/internal/auth"
 	"github.com/Mascottz/PockDev/apps/engine/internal/blob"
 	"github.com/Mascottz/PockDev/apps/engine/internal/config"
 	"github.com/Mascottz/PockDev/apps/engine/internal/db"
@@ -114,10 +115,21 @@ func main() {
 	}
 
 	dash := &api.API{
-		Store:     st,
-		Agent:     pocketAgent,
-		APIToken:  cfg.APIToken,
-		StartedAt: time.Now(),
+		Store:                st,
+		Agent:                pocketAgent,
+		APIToken:             cfg.APIToken,
+		GitHubAuthConfigured: cfg.GitHubAuthConfigured(),
+		StartedAt:            time.Now(),
+	}
+
+	githubAuth := &auth.Handler{
+		ClientID:       cfg.GitHubClientID,
+		ClientSecret:   cfg.GitHubClientSecret,
+		OAuthBaseURL:   cfg.GitHubOAuthBaseURL,
+		APIBaseURL:     cfg.GitHubAPIBaseURL,
+		FrontendOrigin: cfg.FrontendOrigin,
+		AdminLogin:     cfg.AdminGitHubLogin,
+		Store:          st,
 	}
 
 	allowedOrigins := []string{"http://localhost:3000"}
@@ -130,6 +142,7 @@ func main() {
 	mux.Handle("POST /v1/errors", errorsIngest)
 	mux.Handle("POST /webhooks/whatsapp", waHook)
 	dash.Register(mux)
+	githubAuth.Register(mux)
 
 	server := &http.Server{
 		Addr:              ":" + cfg.Port,

@@ -3,12 +3,13 @@
 package api
 
 import (
+	"context"
 	"net/http"
-	"regexp"
 	"strings"
 	"time"
 
 	"github.com/Mascottz/PockDev/apps/engine/internal/agent"
+	"github.com/Mascottz/PockDev/apps/engine/internal/auth"
 	"github.com/Mascottz/PockDev/apps/engine/internal/httpx"
 	"github.com/Mascottz/PockDev/apps/engine/internal/id"
 	"github.com/Mascottz/PockDev/apps/engine/internal/model"
@@ -18,11 +19,37 @@ import (
 
 // API holds the dashboard routes.
 type API struct {
-	Store     store.Store
-	Agent     *agent.Agent
-	APIToken  string
-	StartedAt time.Time
-	Now       func() time.Time
+	Store    store.Store
+	Agent    *agent.Agent
+	APIToken string
+	// GitHubAuthConfigured reports whether GitHub OAuth sign in is enabled.
+	GitHubAuthConfigured bool
+	StartedAt            time.Time
+	Now                  func() time.Time
+}
+
+// authInfo is the resolved auth context for one request.
+type authInfo struct {
+	// Mode is "session" for GitHub logins and "token" for API_TOKEN calls.
+	Mode string
+	// User is nil in token mode.
+	User *model.User
+	// WorkspaceID is the workspace every query must respect.
+	WorkspaceID string
+}
+
+type authInfoKey struct{}
+
+func withAuthInfo(r *http.Request, info *authInfo) *http.Request {
+	return r.WithContext(context.WithValue(r.Context(), authInfoKey{}, info))
+}
+
+func authInfoFrom(r *http.Request) *authInfo {
+	info, _ := r.Context().Value(authInfoKey{}).(*authInfo)
+	if info == nil {
+		return &authInfo{Mode: "token", WorkspaceID: store.DefaultWorkspaceID}
+	}
+	return info
 }
 
 // Register mounts every route on mux.
@@ -35,6 +62,9 @@ func (a *API) Register(mux *http.ServeMux) {
 	api.HandleFunc("POST /api/deliveries/{id}/replay", a.auth(a.replayDelivery))
 	api.HandleFunc("GET /api/incidents", a.auth(a.listIncidents))
 	api.HandleFunc("POST /api/incidents/{id}/action", a.auth(a.incidentAction))
+	api.HandleFunc("GET /api/me", a.auth(a.me))
+	api.HandleFunc("POST /api/workspaces", a.auth(a.createWorkspace))
+	api.HandleFunc("POST /api/auth/logout", a.logout)
 	mux.Handle("/api/", api)
 
 	mux.HandleFunc("GET /healthz", a.healthz)
@@ -47,23 +77,148 @@ func (a *API) now() time.Time {
 	return time.Now()
 }
 
+// auth resolves the caller into an auth context:
+//
+// Case 1: a Bearer pds_ session token resolves through Store.GetSession. The
+// X-PockDev-Workspace header switches the active workspace after a membership
+// check.
+//
+// Case 2: a Bearer token matching APIToken runs in token mode against the
+// default workspace, or the header workspace for admin inspection.
+//
+// Anything else is rejected with 401.
 func (a *API) auth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if httpx.Bearer(r) != a.APIToken {
-			httpx.Error(w, http.StatusUnauthorized, "invalid API token")
+		token := httpx.Bearer(r)
+		hdrWorkspace := strings.TrimSpace(r.Header.Get("X-PockDev-Workspace"))
+
+		if strings.HasPrefix(token, auth.SessionTokenPrefix) {
+			sess, user, err := a.Store.GetSession(r.Context(), auth.HashToken(token), a.now())
+			if err != nil {
+				httpx.Error(w, http.StatusUnauthorized, "authentication required")
+				return
+			}
+			workspaceID := sess.WorkspaceID
+			if hdrWorkspace != "" {
+				ok, err := a.Store.UserHasWorkspace(r.Context(), user.ID, hdrWorkspace)
+				if err != nil {
+					httpx.Error(w, http.StatusInternalServerError, "could not load workspace")
+					return
+				}
+				if !ok {
+					httpx.Error(w, http.StatusForbidden, "forbidden")
+					return
+				}
+				workspaceID = hdrWorkspace
+			}
+			next(w, withAuthInfo(r, &authInfo{Mode: "session", User: user, WorkspaceID: workspaceID}))
 			return
 		}
-		next(w, r)
+
+		if a.APIToken != "" && token == a.APIToken {
+			workspaceID := store.DefaultWorkspaceID
+			if hdrWorkspace != "" {
+				workspaceID = hdrWorkspace
+			}
+			next(w, withAuthInfo(r, &authInfo{Mode: "token", WorkspaceID: workspaceID}))
+			return
+		}
+
+		httpx.Error(w, http.StatusUnauthorized, "authentication required")
 	}
 }
 
 func (a *API) healthz(w http.ResponseWriter, r *http.Request) {
 	up := int(a.now().Sub(a.StartedAt).Seconds())
-	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "uptimeSeconds": up})
+	httpx.JSON(w, http.StatusOK, map[string]any{
+		"ok":                  true,
+		"uptimeSeconds":       up,
+		"githubAuthConfigured": a.GitHubAuthConfigured,
+	})
+}
+
+func (a *API) me(w http.ResponseWriter, r *http.Request) {
+	info := authInfoFrom(r)
+	wsp, err := a.Store.GetWorkspace(r.Context(), info.WorkspaceID)
+	if err != nil {
+		httpx.Error(w, http.StatusNotFound, "workspace not found")
+		return
+	}
+	var user any
+	if info.User != nil {
+		user = map[string]string{
+			"id":          info.User.ID,
+			"githubLogin": info.User.GitHubLogin,
+			"name":        info.User.Name,
+			"email":       info.User.Email,
+			"avatarUrl":   info.User.AvatarURL,
+		}
+	}
+	workspaces := []model.WorkspaceSummary{}
+	if info.Mode == "session" {
+		list, err := a.Store.ListUserWorkspaces(r.Context(), info.User.ID)
+		if err != nil {
+			httpx.Error(w, http.StatusInternalServerError, "could not load workspaces")
+			return
+		}
+		workspaces = list
+	}
+	httpx.JSON(w, http.StatusOK, map[string]any{
+		"mode":      info.Mode,
+		"user":      user,
+		"workspace": map[string]string{"id": wsp.ID, "name": wsp.Name, "slug": wsp.Slug},
+		"workspaces": workspaces,
+	})
+}
+
+type createWorkspaceRequest struct {
+	Name string `json:"name"`
+	Slug string `json:"slug"`
+}
+
+func (a *API) createWorkspace(w http.ResponseWriter, r *http.Request) {
+	info := authInfoFrom(r)
+	if info.Mode != "session" {
+		httpx.Error(w, http.StatusForbidden, "session required")
+		return
+	}
+	var req createWorkspaceRequest
+	if !httpx.DecodeJSON(w, r, &req) {
+		return
+	}
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		httpx.Error(w, http.StatusBadRequest, "name is required")
+		return
+	}
+	slug := strings.TrimSpace(req.Slug)
+	if slug == "" {
+		slug = store.Slugify(name)
+	}
+	wsp, err := a.Store.CreateWorkspace(r.Context(), info.User.ID, name, slug)
+	if err != nil {
+		httpx.Error(w, http.StatusConflict, "workspace with this slug already exists")
+		return
+	}
+	httpx.JSON(w, http.StatusCreated, map[string]string{
+		"id":   wsp.ID,
+		"name": wsp.Name,
+		"slug": wsp.Slug,
+		"role": "owner",
+	})
+}
+
+func (a *API) logout(w http.ResponseWriter, r *http.Request) {
+	token := httpx.Bearer(r)
+	if strings.HasPrefix(token, auth.SessionTokenPrefix) {
+		_ = a.Store.DeleteSession(r.Context(), auth.HashToken(token))
+	}
+	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 func (a *API) overview(w http.ResponseWriter, r *http.Request) {
-	o, err := a.Store.Overview(r.Context(), a.now())
+	info := authInfoFrom(r)
+	o, err := a.Store.Overview(r.Context(), info.WorkspaceID, a.now())
 	if err != nil {
 		httpx.Error(w, http.StatusInternalServerError, "could not load overview")
 		return
@@ -72,7 +227,8 @@ func (a *API) overview(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) listProjects(w http.ResponseWriter, r *http.Request) {
-	list, err := a.Store.ListProjects(r.Context())
+	info := authInfoFrom(r)
+	list, err := a.Store.ListProjects(r.Context(), info.WorkspaceID)
 	if err != nil {
 		httpx.Error(w, http.StatusInternalServerError, "could not load projects")
 		return
@@ -89,6 +245,7 @@ type createProjectRequest struct {
 }
 
 func (a *API) createProject(w http.ResponseWriter, r *http.Request) {
+	info := authInfoFrom(r)
 	var req createProjectRequest
 	if !httpx.DecodeJSON(w, r, &req) {
 		return
@@ -100,11 +257,12 @@ func (a *API) createProject(w http.ResponseWriter, r *http.Request) {
 	}
 	slug := strings.TrimSpace(req.Slug)
 	if slug == "" {
-		slug = slugify(req.Name)
+		slug = store.Slugify(req.Name)
 	}
 	now := a.now()
 	p := &model.Project{
 		ID:            id.New("prj_", 16),
+		WorkspaceID:   info.WorkspaceID,
 		Name:          req.Name,
 		Slug:          slug,
 		EndpointKey:   id.Token(24),
@@ -123,9 +281,11 @@ func (a *API) createProject(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) listDeliveries(w http.ResponseWriter, r *http.Request) {
+	info := authInfoFrom(r)
 	f := model.DeliveryFilter{
-		ProjectID: r.URL.Query().Get("projectId"),
-		Status:    r.URL.Query().Get("status"),
+		WorkspaceID: info.WorkspaceID,
+		ProjectID:   r.URL.Query().Get("projectId"),
+		Status:      r.URL.Query().Get("status"),
 	}
 	list, err := a.Store.ListDeliveries(r.Context(), f)
 	if err != nil {
@@ -135,8 +295,30 @@ func (a *API) listDeliveries(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusOK, list)
 }
 
+// projectInWorkspace loads the delivery project and checks it belongs to the
+// caller workspace. A miss reports 404 so cross workspace probing is
+// impossible.
+func (a *API) projectInWorkspace(r *http.Request, projectID, workspaceID string) bool {
+	p, err := a.Store.GetProject(r.Context(), projectID)
+	if err != nil {
+		return false
+	}
+	pws := p.WorkspaceID
+	if pws == "" {
+		pws = store.DefaultWorkspaceID
+	}
+	return pws == workspaceID
+}
+
 func (a *API) replayDelivery(w http.ResponseWriter, r *http.Request) {
-	d, err := worker.Replay(r.Context(), a.Store, r.PathValue("id"))
+	info := authInfoFrom(r)
+	deliveryID := r.PathValue("id")
+	d, err := a.Store.GetDelivery(r.Context(), deliveryID)
+	if err != nil || !a.projectInWorkspace(r, d.ProjectID, info.WorkspaceID) {
+		httpx.Error(w, http.StatusNotFound, "delivery not found")
+		return
+	}
+	d, err = worker.Replay(r.Context(), a.Store, deliveryID)
 	if err != nil {
 		httpx.Error(w, http.StatusNotFound, "delivery not found")
 		return
@@ -145,7 +327,11 @@ func (a *API) replayDelivery(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) listIncidents(w http.ResponseWriter, r *http.Request) {
-	f := model.IncidentFilter{ProjectID: r.URL.Query().Get("projectId")}
+	info := authInfoFrom(r)
+	f := model.IncidentFilter{
+		WorkspaceID: info.WorkspaceID,
+		ProjectID:   r.URL.Query().Get("projectId"),
+	}
 	list, err := a.Store.ListIncidents(r.Context(), f)
 	if err != nil {
 		httpx.Error(w, http.StatusInternalServerError, "could not load incidents")
@@ -159,12 +345,19 @@ type incidentActionRequest struct {
 }
 
 func (a *API) incidentAction(w http.ResponseWriter, r *http.Request) {
+	info := authInfoFrom(r)
 	var req incidentActionRequest
 	if !httpx.DecodeJSON(w, r, &req) {
 		return
 	}
 	incidentID := r.PathValue("id")
 	ctx := r.Context()
+
+	inc, err := a.Store.GetIncident(ctx, incidentID)
+	if err != nil || !a.projectInWorkspace(r, inc.ProjectID, info.WorkspaceID) {
+		httpx.Error(w, http.StatusNotFound, "incident not found")
+		return
+	}
 
 	switch req.Action {
 	case "draft_pr":
@@ -214,16 +407,4 @@ func (a *API) incidentAction(w http.ResponseWriter, r *http.Request) {
 	default:
 		httpx.Error(w, http.StatusBadRequest, "action must be draft_pr, replay_all, resolve, or mute")
 	}
-}
-
-var slugStrip = regexp.MustCompile(`[^a-z0-9]+`)
-
-func slugify(s string) string {
-	s = strings.ToLower(strings.TrimSpace(s))
-	s = slugStrip.ReplaceAllString(s, "-")
-	s = strings.Trim(s, "-")
-	if s == "" {
-		s = "project"
-	}
-	return s
 }
