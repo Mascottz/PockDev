@@ -17,7 +17,8 @@ import { GitHubMark, OctagonAvatar } from "./GitHubMark";
 export function TopNav() {
   const pathname = usePathname();
   const onDeck = pathname?.startsWith("/deck");
-  const onBrand = pathname?.startsWith("/brand");
+  const onPricing = pathname?.startsWith("/pricing");
+  const onHome = pathname === "/";
 
   const [hasToken, setHasToken] = useState(false);
   const [user, setUser] = useState<AuthUser | null>(null);
@@ -81,7 +82,7 @@ export function TopNav() {
           <Link
             href="/"
             className={`clip-prism-sm px-3.5 py-1.5 text-xs font-semibold uppercase tracking-wider transition-colors ${
-              !onDeck && !onBrand
+              onHome
                 ? "bg-basalt text-citron border-b border-citron"
                 : "text-ash hover:text-chalk hover:bg-olive"
             }`}
@@ -90,14 +91,14 @@ export function TopNav() {
           </Link>
 
           <Link
-            href="/brand"
-            className={`hidden sm:inline-block clip-prism-sm px-3.5 py-1.5 text-xs font-semibold uppercase tracking-wider transition-colors ${
-              onBrand
+            href="/pricing"
+            className={`clip-prism-sm px-3.5 py-1.5 text-xs font-semibold uppercase tracking-wider transition-colors ${
+              onPricing
                 ? "bg-basalt text-citron border-b border-citron"
                 : "text-ash hover:text-chalk hover:bg-olive"
             }`}
           >
-            Brand Kit
+            Pricing
           </Link>
 
           {hasToken ? (

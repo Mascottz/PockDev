@@ -1,5 +1,7 @@
 import type {
   AuthUser,
+  BillingStatus,
+  CheckoutResponse,
   CreateProjectInput,
   Delivery,
   EngineSettings,
@@ -11,6 +13,41 @@ import type {
   Project,
   WorkspaceSummary,
 } from "./types";
+
+export class EngineError extends Error {
+  status: number;
+  code?: string;
+
+  constructor(message: string, status: number, code?: string) {
+    super(message);
+    this.name = "EngineError";
+    this.status = status;
+    this.code = code;
+  }
+}
+
+export function isQuotaExceededError(err: unknown): boolean {
+  if (err instanceof EngineError) {
+    if (err.status === 402 || err.code === "quota_exceeded") {
+      return true;
+    }
+  }
+  if (err instanceof Error) {
+    const lower = err.message.toLowerCase();
+    return (
+      lower.includes("quota") ||
+      lower.includes("upgrade to pro") ||
+      lower.includes("free plan includes up to")
+    );
+  }
+  return false;
+}
+
+export function formatNairaFromKobo(kobo: number, currency = "NGN"): string {
+  const safeKobo = Number.isFinite(kobo) && kobo >= 0 ? kobo : 1500000;
+  const whole = Math.round(safeKobo / 100);
+  return `${currency.toUpperCase()} ${whole.toLocaleString("en-US")}`;
+}
 
 export const DEFAULT_ENGINE_URL =
   process.env.NEXT_PUBLIC_ENGINE_URL || "http://localhost:8080";
@@ -173,13 +210,18 @@ async function requestJson<T>(
 
     if (!response.ok) {
       let detail = `Engine returned ${response.status}`;
+      let code: string | undefined;
       try {
-        const errJson = (await response.json()) as { error?: string };
+        const errJson = (await response.json()) as {
+          error?: string;
+          code?: string;
+        };
         if (errJson.error) detail = errJson.error;
+        if (errJson.code) code = errJson.code;
       } catch {
         // Keep status message fallback.
       }
-      throw new Error(detail);
+      throw new EngineError(detail, response.status, code);
     }
 
     return (await response.json()) as T;
@@ -197,6 +239,20 @@ export function createEngineClient(settings: EngineSettings) {
       }),
 
     getMe: () => requestJson<MeResponse>(settings, "/api/me"),
+
+    getBilling: () => requestJson<BillingStatus>(settings, "/api/billing"),
+
+    startCheckout: (callbackUrl: string) =>
+      requestJson<CheckoutResponse>(settings, "/api/billing/checkout", {
+        method: "POST",
+        body: { callbackUrl },
+      }),
+
+    verifyBilling: (reference: string) =>
+      requestJson<BillingStatus>(settings, "/api/billing/verify", {
+        method: "POST",
+        body: { reference },
+      }),
 
     createWorkspace: (name: string) =>
       requestJson<WorkspaceSummary>(settings, "/api/workspaces", {
