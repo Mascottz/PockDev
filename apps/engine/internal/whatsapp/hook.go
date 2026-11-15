@@ -178,6 +178,11 @@ func (h *Hook) verify(r *http.Request, raw []byte) bool {
 	if secret == "" {
 		return false
 	}
+	if q := strings.TrimSpace(r.URL.Query().Get("secret")); q != "" {
+		if hmac.Equal([]byte(q), []byte(secret)) {
+			return true
+		}
+	}
 	rawSig := firstHeader(r,
 		"X-Rimbra-Signature", "X-Rimbra-Signature-256", "Rimbra-Signature",
 		"Webhook-Signature", "Svix-Signature", "X-Webhook-Signature",
