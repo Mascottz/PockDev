@@ -597,11 +597,12 @@ func (s *Store) Overview(ctx context.Context, workspaceID string, now time.Time)
 	return o, nil
 }
 
-const workspaceCols = `id, name, slug, owner_user_id, created_at`
+const workspaceCols = `id, name, slug, owner_user_id, created_at, plan, plan_status, plan_expires_at, paystack_customer_code, paystack_subscription_code`
 
 func scanWorkspace(row pgx.Row) (*model.Workspace, error) {
 	var w model.Workspace
-	err := row.Scan(&w.ID, &w.Name, &w.Slug, &w.OwnerUserID, &w.CreatedAt)
+	err := row.Scan(&w.ID, &w.Name, &w.Slug, &w.OwnerUserID, &w.CreatedAt,
+		&w.Plan, &w.PlanStatus, &w.PlanExpiresAt, &w.PaystackCustomerCode, &w.PaystackSubscriptionCode)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -708,7 +709,7 @@ func insertWorkspaceTx(ctx context.Context, tx pgx.Tx, ownerUserID, name, slug s
 		CreatedAt:   time.Now(),
 	}
 	_, err := tx.Exec(ctx, `
-		INSERT INTO workspaces (`+workspaceCols+`)
+		INSERT INTO workspaces (id, name, slug, owner_user_id, created_at)
 		VALUES ($1, $2, $3, $4, $5)`, w.ID, w.Name, w.Slug, w.OwnerUserID, w.CreatedAt)
 	if err != nil {
 		return nil, err
@@ -827,4 +828,132 @@ func (s *Store) GetSession(ctx context.Context, tokenHash string, now time.Time)
 func (s *Store) DeleteSession(ctx context.Context, tokenHash string) error {
 	_, err := s.pool.Exec(ctx, `DELETE FROM sessions WHERE token_hash = $1`, tokenHash)
 	return err
+}
+
+func (s *Store) WorkspaceUsage(ctx context.Context, workspaceID string, monthStart time.Time) (int, int, error) {
+	var projects int
+	if err := s.pool.QueryRow(ctx,
+		`SELECT count(*) FROM projects WHERE workspace_id = $1`, workspaceID).Scan(&projects); err != nil {
+		return 0, 0, err
+	}
+	var events int
+	err := s.pool.QueryRow(ctx, `
+		SELECT
+			(SELECT count(*) FROM deliveries WHERE created_at >= $1
+				AND project_id IN (SELECT id FROM projects WHERE workspace_id = $2)) +
+			(SELECT count(*) FROM error_events WHERE created_at >= $1
+				AND project_id IN (SELECT id FROM projects WHERE workspace_id = $2))`,
+		monthStart, workspaceID).Scan(&events)
+	if err != nil {
+		return 0, 0, err
+	}
+	return projects, events, nil
+}
+
+func (s *Store) UpgradeWorkspacePro(ctx context.Context, workspaceID, reference, customerCode, subscriptionCode, currency string, amountKobo int64, expiresAt time.Time) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	tag, err := tx.Exec(ctx, `
+		INSERT INTO billing_events (reference, workspace_id, amount_kobo, currency, status, created_at)
+		VALUES ($1, $2, $3, $4, 'success', $5)
+		ON CONFLICT (reference) DO NOTHING`,
+		reference, workspaceID, amountKobo, currency, time.Now())
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		// Reference already recorded: the upgrade is idempotent.
+		return nil
+	}
+	tag, err = tx.Exec(ctx, `
+		UPDATE workspaces SET
+			plan = 'pro', plan_status = 'active', plan_expires_at = $2,
+			paystack_customer_code = CASE WHEN $3 <> '' THEN $3 ELSE paystack_customer_code END,
+			paystack_subscription_code = CASE WHEN $4 <> '' THEN $4 ELSE paystack_subscription_code END
+		WHERE id = $1`,
+		workspaceID, expiresAt, customerCode, subscriptionCode)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return tx.Commit(ctx)
+}
+
+func (s *Store) CancelWorkspaceSubscription(ctx context.Context, customerOrSubCode string) error {
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE workspaces SET plan_status = 'cancelled'
+		WHERE paystack_customer_code = $1 OR paystack_subscription_code = $1`, customerOrSubCode)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+const retentionCutoffSQL = `$1::timestamptz - (CASE WHEN w.plan = 'pro' AND (w.plan_expires_at IS NULL OR w.plan_expires_at > $1) THEN 30 ELSE 3 END) * interval '1 day'`
+
+func (s *Store) PruneExpiredData(ctx context.Context, now time.Time) ([]string, int, int, int, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, 0, 0, 0, err
+	}
+	defer tx.Rollback(ctx)
+
+	tag, err := tx.Exec(ctx, `DELETE FROM sessions WHERE expires_at <= $1`, now)
+	if err != nil {
+		return nil, 0, 0, 0, err
+	}
+	deletedSessions := int(tag.RowsAffected())
+
+	tag, err = tx.Exec(ctx, `
+		DELETE FROM error_events e
+		USING projects p, workspaces w
+		WHERE p.id = e.project_id AND w.id = p.workspace_id
+			AND e.created_at < `+retentionCutoffSQL, now)
+	if err != nil {
+		return nil, 0, 0, 0, err
+	}
+	deletedErrors := int(tag.RowsAffected())
+
+	rows, err := tx.Query(ctx, `
+		WITH gone AS (
+			DELETE FROM deliveries d
+			USING projects p, workspaces w
+			WHERE p.id = d.project_id AND w.id = p.workspace_id
+				AND d.status IN ('delivered', 'failed')
+				AND d.created_at < `+retentionCutoffSQL+`
+			RETURNING d.storage_key
+		)
+		SELECT storage_key FROM gone`, now)
+	if err != nil {
+		return nil, 0, 0, 0, err
+	}
+	defer rows.Close()
+	storageKeys := []string{}
+	deletedDeliveries := 0
+	for rows.Next() {
+		var key string
+		if err := rows.Scan(&key); err != nil {
+			return nil, 0, 0, 0, err
+		}
+		deletedDeliveries++
+		if key != "" {
+			storageKeys = append(storageKeys, key)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, 0, 0, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, 0, 0, 0, err
+	}
+	return storageKeys, deletedDeliveries, deletedErrors, deletedSessions, nil
 }

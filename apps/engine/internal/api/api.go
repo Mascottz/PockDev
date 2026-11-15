@@ -4,12 +4,15 @@ package api
 
 import (
 	"context"
+	"encoding/json"
+	"io"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/Mascottz/PockDev/apps/engine/internal/agent"
 	"github.com/Mascottz/PockDev/apps/engine/internal/auth"
+	"github.com/Mascottz/PockDev/apps/engine/internal/billing"
 	"github.com/Mascottz/PockDev/apps/engine/internal/httpx"
 	"github.com/Mascottz/PockDev/apps/engine/internal/id"
 	"github.com/Mascottz/PockDev/apps/engine/internal/model"
@@ -24,8 +27,16 @@ type API struct {
 	APIToken string
 	// GitHubAuthConfigured reports whether GitHub OAuth sign in is enabled.
 	GitHubAuthConfigured bool
-	StartedAt            time.Time
-	Now                  func() time.Time
+	// Billing talks to Paystack; nil disables checkout and verify.
+	Billing *billing.Client
+	// ProPriceKobo is the configured Pro plan price in kobo.
+	ProPriceKobo int64
+	// PaystackCurrency is the billing currency code.
+	PaystackCurrency string
+	// FrontendOrigin is the trusted dashboard origin for checkout callbacks.
+	FrontendOrigin string
+	StartedAt      time.Time
+	Now            func() time.Time
 }
 
 // authInfo is the resolved auth context for one request.
@@ -65,6 +76,9 @@ func (a *API) Register(mux *http.ServeMux) {
 	api.HandleFunc("GET /api/me", a.auth(a.me))
 	api.HandleFunc("POST /api/workspaces", a.auth(a.createWorkspace))
 	api.HandleFunc("POST /api/auth/logout", a.logout)
+	api.HandleFunc("GET /api/billing", a.auth(a.billingInfo))
+	api.HandleFunc("POST /api/billing/checkout", a.auth(a.billingCheckout))
+	api.HandleFunc("POST /api/billing/verify", a.auth(a.billingVerify))
 	mux.Handle("/api/", api)
 
 	mux.HandleFunc("GET /healthz", a.healthz)
@@ -260,6 +274,30 @@ func (a *API) createProject(w http.ResponseWriter, r *http.Request) {
 		slug = store.Slugify(req.Name)
 	}
 	now := a.now()
+
+	// Plan quota: the effective plan caps how many projects a workspace can
+	// watch.
+	wsp, err := a.Store.GetWorkspace(r.Context(), info.WorkspaceID)
+	if err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "could not load workspace")
+		return
+	}
+	plan := model.PlanFor(model.EffectivePlan(wsp, now), a.ProPriceKobo)
+	monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+	projectsCount, _, err := a.Store.WorkspaceUsage(r.Context(), info.WorkspaceID, monthStart)
+	if err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "could not load usage")
+		return
+	}
+	if projectsCount >= plan.MaxProjects {
+		msg := "Free plan includes up to 2 watched apps. Upgrade to Pro for up to 20 apps."
+		if plan.Name == model.PlanPro {
+			msg = "Pro plan includes up to 20 watched apps."
+		}
+		httpx.JSON(w, http.StatusPaymentRequired, map[string]string{"error": msg, "code": "quota_exceeded"})
+		return
+	}
+
 	p := &model.Project{
 		ID:            id.New("prj_", 16),
 		WorkspaceID:   info.WorkspaceID,
@@ -407,4 +445,196 @@ func (a *API) incidentAction(w http.ResponseWriter, r *http.Request) {
 	default:
 		httpx.Error(w, http.StatusBadRequest, "action must be draft_pr, replay_all, resolve, or mute")
 	}
+}
+
+// trustedBillingOrigins lists the dashboard origins allowed as checkout
+// callback targets.
+func (a *API) trustedBillingOrigins() []string {
+	origins := []string{"https://pockdev.vercel.app", "http://localhost:3000"}
+	if f := strings.TrimSuffix(strings.TrimSpace(a.FrontendOrigin), "/"); f != "" {
+		origins = append(origins, f)
+	}
+	return origins
+}
+
+// primaryBillingOrigin is the default checkout callback origin.
+func (a *API) primaryBillingOrigin() string {
+	if f := strings.TrimSuffix(strings.TrimSpace(a.FrontendOrigin), "/"); f != "" {
+		return f
+	}
+	return "https://pockdev.vercel.app"
+}
+
+// trustedRedirect reports whether the URL stays on a trusted dashboard origin.
+func trustedRedirect(origins []string, target string) bool {
+	for _, base := range origins {
+		if target == base || strings.HasPrefix(target, base+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// billingPayload builds the GET /api/billing body for one workspace.
+func (a *API) billingPayload(ctx context.Context, wsp *model.Workspace, now time.Time) (map[string]any, error) {
+	plan := model.PlanFor(model.EffectivePlan(wsp, now), a.ProPriceKobo)
+	monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+	projectsUsed, eventsUsed, err := a.Store.WorkspaceUsage(ctx, wsp.ID, monthStart)
+	if err != nil {
+		return nil, err
+	}
+	planStatus := wsp.PlanStatus
+	if planStatus == "" {
+		planStatus = "active"
+	}
+	currency := a.PaystackCurrency
+	if currency == "" {
+		currency = "NGN"
+	}
+	return map[string]any{
+		"plan":               model.EffectivePlan(wsp, now),
+		"planStatus":         planStatus,
+		"planExpiresAt":      wsp.PlanExpiresAt,
+		"paystackConfigured": a.Billing != nil && a.Billing.Configured(),
+		"currency":           currency,
+		"proPriceKobo":       a.ProPriceKobo,
+		"usage": map[string]any{
+			"projectsUsed":      projectsUsed,
+			"projectsLimit":     plan.MaxProjects,
+			"monthlyEventsUsed": eventsUsed,
+			"monthlyEventsLimit": plan.MonthlyEventsLimit,
+			"retentionDays":     plan.RetentionDays,
+		},
+	}, nil
+}
+
+func (a *API) billingInfo(w http.ResponseWriter, r *http.Request) {
+	info := authInfoFrom(r)
+	wsp, err := a.Store.GetWorkspace(r.Context(), info.WorkspaceID)
+	if err != nil {
+		httpx.Error(w, http.StatusNotFound, "workspace not found")
+		return
+	}
+	payload, err := a.billingPayload(r.Context(), wsp, a.now())
+	if err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "could not load usage")
+		return
+	}
+	httpx.JSON(w, http.StatusOK, payload)
+}
+
+type checkoutRequest struct {
+	CallbackUrl string `json:"callbackUrl"`
+}
+
+func (a *API) billingCheckout(w http.ResponseWriter, r *http.Request) {
+	info := authInfoFrom(r)
+	if a.Billing == nil || !a.Billing.Configured() {
+		httpx.Error(w, http.StatusServiceUnavailable, "paystack billing is not configured")
+		return
+	}
+
+	var req checkoutRequest
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
+	if err != nil {
+		httpx.Error(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if strings.TrimSpace(string(body)) != "" {
+		if err := json.Unmarshal(body, &req); err != nil {
+			httpx.Error(w, http.StatusBadRequest, "invalid JSON body")
+			return
+		}
+	}
+
+	callbackURL := strings.TrimSpace(req.CallbackUrl)
+	if callbackURL == "" {
+		callbackURL = a.primaryBillingOrigin() + "/deck?billing=verify"
+	} else if !trustedRedirect(a.trustedBillingOrigins(), callbackURL) {
+		httpx.Error(w, http.StatusBadRequest, "invalid callbackUrl")
+		return
+	}
+
+	email := "billing@pockdev.app"
+	if info.User != nil {
+		if strings.TrimSpace(info.User.Email) != "" {
+			email = info.User.Email
+		} else {
+			email = info.User.GitHubLogin + "@users.noreply.github.com"
+		}
+	}
+
+	res, err := a.Billing.InitializeTransaction(r.Context(), billing.InitializeInput{
+		Email:       email,
+		AmountKobo:  a.ProPriceKobo,
+		Currency:    a.PaystackCurrency,
+		CallbackURL: callbackURL,
+		WorkspaceID: info.WorkspaceID,
+	})
+	if err != nil {
+		httpx.Error(w, http.StatusBadGateway, "paystack initialize failed")
+		return
+	}
+	httpx.JSON(w, http.StatusOK, map[string]string{
+		"authorizationUrl": res.AuthorizationURL,
+		"reference":        res.Reference,
+	})
+}
+
+type verifyRequest struct {
+	Reference string `json:"reference"`
+}
+
+func (a *API) billingVerify(w http.ResponseWriter, r *http.Request) {
+	info := authInfoFrom(r)
+	if a.Billing == nil || !a.Billing.Configured() {
+		httpx.Error(w, http.StatusServiceUnavailable, "paystack billing is not configured")
+		return
+	}
+	var req verifyRequest
+	if !httpx.DecodeJSON(w, r, &req) {
+		return
+	}
+	if strings.TrimSpace(req.Reference) == "" {
+		httpx.Error(w, http.StatusBadRequest, "reference is required")
+		return
+	}
+
+	res, err := a.Billing.VerifyTransaction(r.Context(), strings.TrimSpace(req.Reference))
+	if err != nil {
+		httpx.Error(w, http.StatusBadGateway, "paystack verify failed")
+		return
+	}
+	if res.Status != "success" {
+		httpx.Error(w, http.StatusPaymentRequired, "payment not successful")
+		return
+	}
+	if res.Metadata.WorkspaceID != info.WorkspaceID {
+		httpx.Error(w, http.StatusForbidden, "workspace mismatch")
+		return
+	}
+
+	now := a.now()
+	currency := res.Currency
+	if currency == "" {
+		currency = a.PaystackCurrency
+	}
+	if err := a.Store.UpgradeWorkspacePro(r.Context(), info.WorkspaceID, res.Reference,
+		res.Customer.CustomerCode, res.SubscriptionCode, currency, res.Amount,
+		now.Add(billing.ProValidity)); err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "could not upgrade workspace")
+		return
+	}
+
+	wsp, err := a.Store.GetWorkspace(r.Context(), info.WorkspaceID)
+	if err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "could not load workspace")
+		return
+	}
+	payload, err := a.billingPayload(r.Context(), wsp, now)
+	if err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "could not load usage")
+		return
+	}
+	httpx.JSON(w, http.StatusOK, payload)
 }

@@ -16,6 +16,7 @@ import (
 	"github.com/Mascottz/PockDev/apps/engine/internal/agent"
 	"github.com/Mascottz/PockDev/apps/engine/internal/api"
 	"github.com/Mascottz/PockDev/apps/engine/internal/auth"
+	"github.com/Mascottz/PockDev/apps/engine/internal/billing"
 	"github.com/Mascottz/PockDev/apps/engine/internal/blob"
 	"github.com/Mascottz/PockDev/apps/engine/internal/config"
 	"github.com/Mascottz/PockDev/apps/engine/internal/db"
@@ -119,7 +120,21 @@ func main() {
 		Agent:                pocketAgent,
 		APIToken:             cfg.APIToken,
 		GitHubAuthConfigured: cfg.GitHubAuthConfigured(),
+		Billing:              billing.NewClient(cfg.PaystackSecretKey, cfg.PaystackBaseURL, cfg.PaystackPlanCode),
+		ProPriceKobo:         cfg.PaystackProAmountKobo,
+		PaystackCurrency:     cfg.PaystackCurrency,
+		FrontendOrigin:       cfg.FrontendOrigin,
 		StartedAt:            time.Now(),
+	}
+
+	paystackHook := &billing.Webhook{
+		Secret: cfg.PaystackSecretKey,
+		Store:  st,
+	}
+
+	retention := &worker.RetentionSweeper{
+		Store: st,
+		Blobs: blobs,
 	}
 
 	githubAuth := &auth.Handler{
@@ -141,6 +156,7 @@ func main() {
 	mux.Handle("POST /in/{endpointKey}", ingest)
 	mux.Handle("POST /v1/errors", errorsIngest)
 	mux.Handle("POST /webhooks/whatsapp", waHook)
+	mux.Handle("POST /webhooks/paystack", paystackHook)
 	dash.Register(mux)
 	githubAuth.Register(mux)
 
@@ -152,6 +168,7 @@ func main() {
 
 	go forwarder.Run(ctx)
 	go pocketAgent.Run(ctx)
+	go retention.Run(ctx)
 	go func() {
 		t := time.NewTicker(time.Minute)
 		defer t.Stop()

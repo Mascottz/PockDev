@@ -62,14 +62,16 @@ func TestStateFreshness(t *testing.T) {
 }
 
 func TestTrustedRedirect(t *testing.T) {
-	base := "http://localhost:3000"
+	h := &Handler{}
 	for _, ok := range []string{
 		"http://localhost:3000",
 		"http://localhost:3000/",
 		"http://localhost:3000/auth/callback",
 		"http://localhost:3000/deck?x=1",
+		"https://pockdev.vercel.app/auth/callback",
+		"https://pockdev.vercel.app/deck?billing=verify",
 	} {
-		if !trustedRedirect(base, ok) {
+		if !h.allowedRedirect(ok) {
 			t.Fatalf("%q must be trusted", ok)
 		}
 	}
@@ -78,9 +80,10 @@ func TestTrustedRedirect(t *testing.T) {
 		"http://evil.com",
 		"https://evil.com/http://localhost:3000",
 		"http://localhost:3001/auth/callback",
+		"https://pockdev.vercel.app.evil.com/x",
 		"",
 	} {
-		if trustedRedirect(base, bad) {
+		if h.allowedRedirect(bad) {
 			t.Fatalf("%q must not be trusted", bad)
 		}
 	}

@@ -51,6 +51,19 @@ func (h *Ingest) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	now := time.Now()
+	if h.Now != nil {
+		now = h.Now()
+	}
+
+	// Monthly event quota for the project workspace.
+	if store.MonthlyEventQuotaReached(r.Context(), h.Store, project.WorkspaceID, now) {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusTooManyRequests)
+		fmt.Fprint(w, `{"error": "monthly event quota reached for workspace", "code": "quota_exceeded"}`)
+		return
+	}
+
 	limit := h.MaxBody
 	if limit <= 0 {
 		limit = 2 * 1024 * 1024
@@ -71,11 +84,6 @@ func (h *Ingest) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	body := raw
-
-	now := time.Now()
-	if h.Now != nil {
-		now = h.Now()
-	}
 
 	deliveryID := id.New("dlv_", 24)
 	storageKey := fmt.Sprintf("deliveries/%s/%s.body", project.ID, deliveryID)

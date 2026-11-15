@@ -10,7 +10,7 @@ import (
 
 func TestSchemaIsIdempotentDDL(t *testing.T) {
 	for _, table := range []string{"projects", "deliveries", "incidents", "error_groups", "error_events",
-		"workspaces", "users", "workspace_members", "sessions"} {
+		"workspaces", "users", "workspace_members", "sessions", "billing_events"} {
 		if !strings.Contains(schemaSQL, "CREATE TABLE IF NOT EXISTS "+table) {
 			t.Fatalf("missing idempotent DDL for %s", table)
 		}

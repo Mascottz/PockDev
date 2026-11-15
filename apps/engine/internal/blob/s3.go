@@ -98,6 +98,28 @@ func (s *S3) Get(ctx context.Context, key string) ([]byte, error) {
 	return io.ReadAll(io.LimitReader(resp.Body, 16*1024*1024))
 }
 
+// Delete removes the body from the bucket. A missing key is not an error.
+func (s *S3) Delete(ctx context.Context, key string) error {
+	u, err := s.objectURL(key)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, u, nil)
+	if err != nil {
+		return err
+	}
+	signV4(req, nil, s.accessKey, s.secretKey, s.region, "s3", s.now().UTC())
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("s3 delete %s: %s", key, resp.Status)
+	}
+	return nil
+}
+
 // signV4 adds SigV4 headers to req. The payload hash covers data (nil means an
 // empty payload). Every header on the request is signed.
 func signV4(req *http.Request, data []byte, accessKey, secretKey, region, service string, t time.Time) {

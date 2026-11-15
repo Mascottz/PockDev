@@ -138,6 +138,57 @@ type Workspace struct {
 	Slug        string    `json:"slug"`
 	OwnerUserID string    `json:"ownerUserId"`
 	CreatedAt   time.Time `json:"createdAt"`
+
+	// Billing: which plan the workspace is on and how Paystack sees it.
+	Plan                    string     `json:"plan"`
+	PlanStatus              string     `json:"planStatus"`
+	PlanExpiresAt           *time.Time `json:"planExpiresAt"`
+	PaystackCustomerCode    string     `json:"paystackCustomerCode"`
+	PaystackSubscriptionCode string    `json:"paystackSubscriptionCode"`
+}
+
+// Billing plan names.
+const (
+	PlanFree = "free"
+	PlanPro  = "pro"
+)
+
+// Plan is one billing tier with its quotas.
+type Plan struct {
+	Name               string
+	MaxProjects        int
+	MonthlyEventsLimit int
+	RetentionDays      int
+	PriceKobo          int64
+}
+
+// FreePlan returns the free tier limits.
+func FreePlan() Plan {
+	return Plan{Name: PlanFree, MaxProjects: 2, MonthlyEventsLimit: 5000, RetentionDays: 3, PriceKobo: 0}
+}
+
+// ProPlan returns the pro tier limits at the configured price.
+func ProPlan(priceKobo int64) Plan {
+	return Plan{Name: PlanPro, MaxProjects: 20, MonthlyEventsLimit: 100000, RetentionDays: 30, PriceKobo: priceKobo}
+}
+
+// PlanFor resolves the tier limits by plan name.
+func PlanFor(name string, proPriceKobo int64) Plan {
+	if name == PlanPro {
+		return ProPlan(proPriceKobo)
+	}
+	return FreePlan()
+}
+
+// EffectivePlan returns "pro" while the pro plan is unexpired, else "free".
+func EffectivePlan(w *Workspace, now time.Time) string {
+	if w == nil || w.Plan != PlanPro {
+		return PlanFree
+	}
+	if w.PlanExpiresAt != nil && !w.PlanExpiresAt.After(now) {
+		return PlanFree
+	}
+	return PlanPro
 }
 
 // User is one GitHub account that can sign in to PockDev.

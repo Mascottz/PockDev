@@ -103,7 +103,7 @@ func TestGitHubOAuthFlow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(cbLoc.String(), "http://localhost:3000/auth/callback#session=pds_") {
+	if !strings.HasPrefix(cbLoc.String(), "https://pockdev.vercel.app/auth/callback#session=pds_") {
 		t.Fatalf("session redirect %q", cbLoc.String())
 	}
 	rawToken := strings.TrimPrefix(cbLoc.Fragment, "session=")

@@ -41,3 +41,52 @@ func TestGitHubAuthConfigured(t *testing.T) {
 		}
 	}
 }
+
+func TestPaystackConfigured(t *testing.T) {
+	cases := []struct {
+		secret, plan string
+		want         bool
+	}{
+		{"", "", false},
+		{"sk_live_x", "", true},
+		{"", "PLN_x", false},
+		{"sk_live_x", "PLN_x", true},
+	}
+	for _, c := range cases {
+		got := Config{PaystackSecretKey: c.secret, PaystackPlanCode: c.plan}.PaystackConfigured()
+		if got != c.want {
+			t.Fatalf("PaystackConfigured(%q, %q) = %v want %v", c.secret, c.plan, got, c.want)
+		}
+	}
+}
+
+func TestPaystackLoadDefaults(t *testing.T) {
+	t.Setenv("PAYSTACK_SECRET_KEY", "sk_test_9")
+	t.Setenv("PAYSTACK_PRO_PLAN_CODE", "PLN_pro")
+	t.Setenv("PAYSTACK_PRO_AMOUNT_KOBO", "2500000")
+	t.Setenv("PAYSTACK_CURRENCY", "GHS")
+	t.Setenv("PAYSTACK_BASE_URL", "https://api.paystack.co")
+	c := FromEnv()
+	if c.PaystackSecretKey != "sk_test_9" || c.PaystackPlanCode != "PLN_pro" {
+		t.Fatalf("credentials %+v", c)
+	}
+	if c.PaystackProAmountKobo != 2500000 || c.PaystackCurrency != "GHS" {
+		t.Fatalf("amount/currency %+v", c)
+	}
+
+	t.Setenv("PAYSTACK_SECRET_KEY", "")
+	t.Setenv("PAYSTACK_PRO_PLAN_CODE", "")
+	t.Setenv("PAYSTACK_PRO_AMOUNT_KOBO", "")
+	t.Setenv("PAYSTACK_CURRENCY", "")
+	t.Setenv("PAYSTACK_BASE_URL", "")
+	plain := FromEnv()
+	if plain.PaystackProAmountKobo != 1500000 {
+		t.Fatalf("default amount %d", plain.PaystackProAmountKobo)
+	}
+	if plain.PaystackCurrency != "NGN" || plain.PaystackBaseURL != "https://api.paystack.co" {
+		t.Fatalf("defaults %+v", plain)
+	}
+	if plain.PaystackConfigured() {
+		t.Fatal("without a secret key billing is not configured")
+	}
+}

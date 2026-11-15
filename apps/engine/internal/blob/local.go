@@ -61,3 +61,15 @@ func (l *Local) Get(_ context.Context, key string) ([]byte, error) {
 	}
 	return data, nil
 }
+
+// Delete removes the body from disk. A missing key is not an error.
+func (l *Local) Delete(_ context.Context, key string) error {
+	p, err := l.path(key)
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("delete blob %s: %w", key, err)
+	}
+	return nil
+}

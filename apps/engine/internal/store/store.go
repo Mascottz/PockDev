@@ -115,4 +115,22 @@ type Store interface {
 	GetSession(ctx context.Context, tokenHash string, now time.Time) (*model.Session, *model.User, error)
 	// DeleteSession removes a session by token hash.
 	DeleteSession(ctx context.Context, tokenHash string) error
+
+	// Billing and retention
+
+	// WorkspaceUsage counts the workspace projects and this month's events
+	// (deliveries plus error events since monthStart).
+	WorkspaceUsage(ctx context.Context, workspaceID string, monthStart time.Time) (projectsCount int, monthlyEvents int, err error)
+	// UpgradeWorkspacePro flips the workspace to pro and records the payment
+	// reference. Duplicate references are idempotent no-ops.
+	UpgradeWorkspacePro(ctx context.Context, workspaceID, reference, customerCode, subscriptionCode, currency string, amountKobo int64, expiresAt time.Time) error
+	// CancelWorkspaceSubscription marks the subscription cancelled for the
+	// workspace owning the customer or subscription code, keeping the plan
+	// active until plan_expires_at.
+	CancelWorkspaceSubscription(ctx context.Context, customerOrSubCode string) error
+	// PruneExpiredData deletes expired sessions, error events past their
+	// workspace retention window, and terminal deliveries past retention. It
+	// returns the storage keys of deleted deliveries so blobs can be removed.
+	// Paused and retrying deliveries are never deleted.
+	PruneExpiredData(ctx context.Context, now time.Time) (storageKeys []string, deletedDeliveries int, deletedErrors int, deletedSessions int, err error)
 }

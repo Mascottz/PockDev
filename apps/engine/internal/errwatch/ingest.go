@@ -5,6 +5,7 @@ package errwatch
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"net/http"
 	"regexp"
 	"strings"
@@ -56,6 +57,19 @@ func (h *Ingest) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	now := time.Now()
+	if h.Now != nil {
+		now = h.Now()
+	}
+
+	// Monthly event quota for the project workspace.
+	if store.MonthlyEventQuotaReached(r.Context(), h.Store, project.WorkspaceID, now) {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusTooManyRequests)
+		fmt.Fprint(w, `{"error": "monthly event quota reached for workspace", "code": "quota_exceeded"}`)
+		return
+	}
+
 	var p Payload
 	if !httpx.DecodeJSON(w, r, &p) {
 		return
@@ -65,10 +79,6 @@ func (h *Ingest) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	now := time.Now()
-	if h.Now != nil {
-		now = h.Now()
-	}
 	window := h.Window
 	if window <= 0 {
 		window = time.Hour

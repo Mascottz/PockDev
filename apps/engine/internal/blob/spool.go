@@ -72,6 +72,18 @@ func (s *Spool) Get(ctx context.Context, key string) ([]byte, error) {
 	return remoteData, nil
 }
 
+// Delete removes the body locally and from the remote store. A missing key is
+// not an error.
+func (s *Spool) Delete(ctx context.Context, key string) error {
+	err := s.local.Delete(ctx, key)
+	if s.remote != nil {
+		if rerr := s.remote.Delete(ctx, key); rerr != nil && err == nil {
+			log.Printf("spool: remote delete failed for %s: %v", key, rerr)
+		}
+	}
+	return err
+}
+
 func (s *Spool) uploadLoop() {
 	for job := range s.uploads {
 		var err error

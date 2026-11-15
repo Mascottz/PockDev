@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -44,6 +45,13 @@ type Config struct {
 	MaxBodyBytes        int64
 	SpikeThreshold      int
 	MuteDuration        time.Duration
+
+	// Paystack billing.
+	PaystackSecretKey     string
+	PaystackBaseURL       string
+	PaystackPlanCode      string
+	PaystackProAmountKobo int64
+	PaystackCurrency      string
 
 	// GitHub OAuth sign in. The base URLs exist so tests can point at fake
 	// GitHub servers.
@@ -88,6 +96,11 @@ func FromEnv() Config {
 		GitHubOAuthBaseURL:  getenv("GITHUB_OAUTH_BASE_URL", "https://github.com"),
 		GitHubAPIBaseURL:    getenv("GITHUB_API_BASE_URL", "https://api.github.com"),
 		AdminGitHubLogin:    getenv("ADMIN_GITHUB_LOGIN", "Mascottz"),
+		PaystackSecretKey:   os.Getenv("PAYSTACK_SECRET_KEY"),
+		PaystackBaseURL:     getenv("PAYSTACK_BASE_URL", "https://api.paystack.co"),
+		PaystackPlanCode:    os.Getenv("PAYSTACK_PRO_PLAN_CODE"),
+		PaystackProAmountKobo: int64(getenvInt("PAYSTACK_PRO_AMOUNT_KOBO", 1500000)),
+		PaystackCurrency:    getenv("PAYSTACK_CURRENCY", "NGN"),
 	}
 }
 
@@ -105,6 +118,11 @@ func (c Config) Validate() error {
 // GitHubAuthConfigured reports whether GitHub OAuth sign in can run.
 func (c Config) GitHubAuthConfigured() bool {
 	return c.GitHubClientID != "" && c.GitHubClientSecret != ""
+}
+
+// PaystackConfigured reports whether Paystack billing can run.
+func (c Config) PaystackConfigured() bool {
+	return strings.TrimSpace(c.PaystackSecretKey) != ""
 }
 
 // S3Enabled reports whether S3 backed blob storage is configured.
