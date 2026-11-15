@@ -106,7 +106,11 @@ func (a *Agent) Diagnose(ctx context.Context, incidentID string) error {
 	if inc.PausedCount == 0 {
 		menu = " Reply 1 to open a fix PR, 2 to replay paused webhooks, or 3 to mute for 1 hour."
 	}
-	message := summary + menu
+	tag := inc.ID
+	if len(tag) > 4 {
+		tag = tag[len(tag)-4:]
+	}
+	message := "[#" + tag + "] " + summary + menu
 
 	if a.Notify != nil {
 		if project.WhatsAppPhone != "" && a.Notify.WhatsAppConfigured() {

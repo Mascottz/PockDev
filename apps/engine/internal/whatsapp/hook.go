@@ -15,6 +15,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Mascottz/PockDev/apps/engine/internal/agent"
@@ -26,11 +27,12 @@ import (
 
 // Hook handles POST /webhooks/whatsapp.
 type Hook struct {
-	Store  store.Store
-	Agent  *agent.Agent
-	Notify *notify.Client
-	Secret string
-	Now    func() time.Time
+	Store     store.Store
+	Agent     *agent.Agent
+	Notify    *notify.Client
+	Secret    string
+	Now       func() time.Time
+	lidPhones sync.Map
 }
 
 // Inbound is the developer reply extracted from Rimbra's webhook body. The
@@ -93,47 +95,111 @@ func (h *Hook) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	inbound.From = normalizePhone(inbound.From)
 	inbound.Text = strings.TrimSpace(inbound.Text)
-	log.Printf("whatsapp hook: event=%q from=%q text=%q raw=%s", eventName, inbound.From, inbound.Text, string(payloadBytes))
 	if inbound.From == "" || inbound.Text == "" {
-		http.Error(w, "from and text are required", http.StatusBadRequest)
+		httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "ignored": "empty"})
 		return
 	}
 
-	// The newest incident this phone was alerted about owns the conversation.
-	listed, err := h.Store.ListIncidents(r.Context(), model.IncidentFilter{AlertPhone: inbound.From, Limit: 20})
-	if err != nil || len(listed) == 0 {
-		h.reply(w, r.Context(), inbound.From, "I do not have an open alert for this number.")
+	fields := strings.Fields(inbound.Text)
+	if len(fields) == 0 || len(fields) > 2 || (fields[0] != "1" && fields[0] != "2" && fields[0] != "3") {
+		// Never log or auto-reply to normal personal or group messages on the linked number.
+		httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "ignored": "non_command"})
 		return
 	}
-	inc := listed[0]
-	for _, cand := range listed {
-		if cand.Status == model.IncidentOpen || cand.Status == model.IncidentFixing {
-			inc = cand
-			break
+	answer := fields[0]
+	code := ""
+	if len(fields) == 2 {
+		code = strings.ToLower(strings.TrimPrefix(fields[1], "#"))
+	}
+
+	lkupPhone := inbound.From
+	if cached, ok := h.lidPhones.Load(inbound.From); ok {
+		lkupPhone = cached.(string)
+	}
+
+	var inc *model.Incident
+	if code != "" {
+		if all, err := h.Store.ListIncidents(r.Context(), model.IncidentFilter{Limit: 50}); err == nil {
+			for i := range all {
+				if all[i].LastAlertPhone != "" && strings.HasSuffix(strings.ToLower(all[i].ID), code) {
+					inc = &all[i]
+					break
+				}
+			}
+		}
+	}
+	if inc == nil {
+		if listed, err := h.Store.ListIncidents(r.Context(), model.IncidentFilter{AlertPhone: lkupPhone, Limit: 20}); err == nil && len(listed) > 0 {
+			inc = &listed[0]
+			for i := range listed {
+				if listed[i].Status == model.IncidentOpen || listed[i].Status == model.IncidentFixing {
+					inc = &listed[i]
+					break
+				}
+			}
+		}
+	}
+	// Fallback when WhatsApp multi-device sends an opaque LID instead of E.164 sender phone.
+	if inc == nil {
+		if all, err := h.Store.ListIncidents(r.Context(), model.IncidentFilter{Limit: 50}); err == nil {
+			phones := map[string]bool{}
+			var newestOpen *model.Incident
+			var newestAny *model.Incident
+			for i := range all {
+				c := &all[i]
+				if c.LastAlertPhone == "" {
+					continue
+				}
+				if newestAny == nil {
+					newestAny = c
+				}
+				if c.Status == model.IncidentOpen || c.Status == model.IncidentFixing {
+					phones[c.LastAlertPhone] = true
+					if newestOpen == nil {
+						newestOpen = c
+					}
+				}
+			}
+			if newestOpen != nil && len(phones) == 1 {
+				inc = newestOpen
+			} else if newestOpen == nil && newestAny != nil {
+				inc = newestAny
+			}
 		}
 	}
 
-	answer := strings.TrimSpace(inbound.Text)
+	if inc == nil {
+		log.Printf("whatsapp hook: command=%q from=%q matched no alerted incident", answer, inbound.From)
+		httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "ignored": "no_incident"})
+		return
+	}
+
+	replyPhone := inc.LastAlertPhone
+	if replyPhone == "" {
+		replyPhone = inbound.From
+	} else if replyPhone != inbound.From {
+		h.lidPhones.Store(inbound.From, replyPhone)
+	}
+	log.Printf("whatsapp hook: command=%q incident=%s reply_to=%s", answer, inc.ID, replyPhone)
+
 	switch {
 	case answer == "1":
-		h.reply(w, r.Context(), inbound.From, "Opening a fix PR for "+inc.Title+" now. I will send the link here.")
-		go h.doDraftPR(inc, inbound.From)
+		h.reply(w, r.Context(), replyPhone, "Opening a fix PR for "+inc.Title+" now. I will send the link here.")
+		go h.doDraftPR(*inc, replyPhone)
 	case answer == "2":
 		updated, n, err := h.Agent.ReplayAll(r.Context(), inc.ID)
 		_ = updated
 		if err != nil {
-			h.reply(w, r.Context(), inbound.From, "I could not replay the webhooks right now.")
+			h.reply(w, r.Context(), replyPhone, "I could not replay the webhooks right now.")
 			return
 		}
-		h.reply(w, r.Context(), inbound.From, fmt.Sprintf("Replaying %d paused webhooks for %s now.", n, inc.Title))
+		h.reply(w, r.Context(), replyPhone, fmt.Sprintf("Replaying %d paused webhooks for %s now.", n, inc.Title))
 	case answer == "3":
 		if _, err := h.Agent.Mute(r.Context(), inc.ID); err != nil {
-			h.reply(w, r.Context(), inbound.From, "I could not mute this incident right now.")
+			h.reply(w, r.Context(), replyPhone, "I could not mute this incident right now.")
 			return
 		}
-		h.reply(w, r.Context(), inbound.From, "Muted "+inc.Title+" for 1 hour. The webhooks stay safe.")
-	default:
-		h.reply(w, r.Context(), inbound.From, "Reply 1 to open a fix PR, 2 to replay paused webhooks, or 3 to mute for 1 hour.")
+		h.reply(w, r.Context(), replyPhone, "Muted "+inc.Title+" for 1 hour. The webhooks stay safe.")
 	}
 }
 
