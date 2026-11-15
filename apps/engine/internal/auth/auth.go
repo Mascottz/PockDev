@@ -84,18 +84,36 @@ func (h *Handler) apiBase() string {
 	return "https://api.github.com"
 }
 
-// defaultFrontend is the trusted dashboard origin.
+// defaultFrontend is the primary trusted dashboard origin.
 func (h *Handler) defaultFrontend() string {
-	base := h.FrontendOrigin
+	base := strings.TrimSpace(h.FrontendOrigin)
 	if base == "" {
-		base = "http://localhost:3000"
+		base = "https://pockdev.vercel.app"
+	}
+	if idx := strings.IndexByte(base, ','); idx > 0 {
+		base = strings.TrimSpace(base[:idx])
 	}
 	return strings.TrimSuffix(base, "/")
 }
 
-// trustedRedirect reports whether redirect stays on the dashboard origin.
-func trustedRedirect(base, redirect string) bool {
-	return redirect == base || strings.HasPrefix(redirect, base+"/")
+// trustedRedirect reports whether redirect stays on an allowed dashboard origin.
+func (h *Handler) allowedRedirect(redirect string) bool {
+	candidates := []string{
+		h.defaultFrontend(),
+		"https://pockdev.vercel.app",
+		"http://localhost:3000",
+	}
+	for _, part := range strings.Split(h.FrontendOrigin, ",") {
+		if trimmed := strings.TrimSuffix(strings.TrimSpace(part), "/"); trimmed != "" {
+			candidates = append(candidates, trimmed)
+		}
+	}
+	for _, base := range candidates {
+		if redirect == base || strings.HasPrefix(redirect, base+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 // signState builds the stateless signed state token. Format:
@@ -148,7 +166,7 @@ func (h *Handler) start(w http.ResponseWriter, r *http.Request) {
 	if redirect == "" {
 		redirect = base + "/auth/callback"
 	}
-	if !trustedRedirect(base, redirect) {
+	if !h.allowedRedirect(redirect) {
 		httpx.Error(w, http.StatusBadRequest, "invalid redirect_to")
 		return
 	}
