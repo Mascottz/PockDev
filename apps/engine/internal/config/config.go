@@ -44,6 +44,14 @@ type Config struct {
 	MaxBodyBytes        int64
 	SpikeThreshold      int
 	MuteDuration        time.Duration
+
+	// GitHub OAuth sign in. The base URLs exist so tests can point at fake
+	// GitHub servers.
+	GitHubClientID     string
+	GitHubClientSecret string
+	GitHubOAuthBaseURL string
+	GitHubAPIBaseURL   string
+	AdminGitHubLogin   string
 }
 
 // FromEnv reads config from environment variables with sane defaults.
@@ -75,6 +83,11 @@ func FromEnv() Config {
 		MaxBodyBytes:        int64(getenvInt("MAX_BODY_BYTES", 2*1024*1024)),
 		SpikeThreshold:      getenvInt("SPIKE_THRESHOLD", 1),
 		MuteDuration:        time.Duration(getenvInt("MUTE_MINUTES", 60)) * time.Minute,
+		GitHubClientID:      os.Getenv("GITHUB_CLIENT_ID"),
+		GitHubClientSecret:  os.Getenv("GITHUB_CLIENT_SECRET"),
+		GitHubOAuthBaseURL:  getenv("GITHUB_OAUTH_BASE_URL", "https://github.com"),
+		GitHubAPIBaseURL:    getenv("GITHUB_API_BASE_URL", "https://api.github.com"),
+		AdminGitHubLogin:    getenv("ADMIN_GITHUB_LOGIN", "Mascottz"),
 	}
 }
 
@@ -83,10 +96,15 @@ func (c Config) Validate() error {
 	if c.DatabaseURL == "" {
 		return fmt.Errorf("DATABASE_URL is required")
 	}
-	if c.APIToken == "" {
-		return fmt.Errorf("API_TOKEN is required")
+	if c.APIToken == "" && !c.GitHubAuthConfigured() {
+		return fmt.Errorf("API_TOKEN or GitHub OAuth credentials are required")
 	}
 	return nil
+}
+
+// GitHubAuthConfigured reports whether GitHub OAuth sign in can run.
+func (c Config) GitHubAuthConfigured() bool {
+	return c.GitHubClientID != "" && c.GitHubClientSecret != ""
 }
 
 // S3Enabled reports whether S3 backed blob storage is configured.

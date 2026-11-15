@@ -13,6 +13,52 @@ CREATE TABLE IF NOT EXISTS projects (
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- Add the multi-tenant Stage 2 tables and migrate projects in place. Safe to
+-- run on every startup.
+
+CREATE TABLE IF NOT EXISTS workspaces (
+    id            TEXT PRIMARY KEY,
+    name          TEXT NOT NULL,
+    slug          TEXT NOT NULL UNIQUE,
+    owner_user_id TEXT NOT NULL DEFAULT '',
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+INSERT INTO workspaces (id, name, slug) VALUES ('wsp_default', 'Default Workspace', 'default')
+    ON CONFLICT (id) DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS users (
+    id                  TEXT PRIMARY KEY,
+    github_id           BIGINT NOT NULL UNIQUE,
+    github_login        TEXT NOT NULL,
+    name                TEXT NOT NULL DEFAULT '',
+    email               TEXT NOT NULL DEFAULT '',
+    avatar_url          TEXT NOT NULL DEFAULT '',
+    default_workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS workspace_members (
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+    user_id      TEXT NOT NULL REFERENCES users(id),
+    role         TEXT NOT NULL DEFAULT 'owner',
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (workspace_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+    token_hash   TEXT PRIMARY KEY,
+    user_id      TEXT NOT NULL REFERENCES users(id),
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+    expires_at   TIMESTAMPTZ NOT NULL,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS workspace_id TEXT NOT NULL DEFAULT 'wsp_default';
+ALTER TABLE projects DROP CONSTRAINT IF EXISTS projects_slug_key;
+CREATE UNIQUE INDEX IF NOT EXISTS projects_workspace_slug_idx ON projects (workspace_id, slug);
+CREATE INDEX IF NOT EXISTS projects_workspace_idx ON projects (workspace_id, created_at ASC);
+
 CREATE TABLE IF NOT EXISTS deliveries (
     id                  TEXT PRIMARY KEY,
     project_id          TEXT NOT NULL REFERENCES projects(id),

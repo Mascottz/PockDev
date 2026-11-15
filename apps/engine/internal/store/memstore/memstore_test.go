@@ -38,7 +38,7 @@ func TestOverviewNumbers(t *testing.T) {
 		CreatedAt: now.Add(-25 * time.Hour),
 	})
 
-	o, err := m.Overview(context.Background(), now)
+	o, err := m.Overview(context.Background(), "wsp_default", now)
 	if err != nil {
 		t.Fatal(err)
 	}

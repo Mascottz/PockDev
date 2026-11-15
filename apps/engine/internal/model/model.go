@@ -5,6 +5,7 @@ import "time"
 // Project is one app or service being watched by PockDev.
 type Project struct {
 	ID            string    `json:"id"`
+	WorkspaceID   string    `json:"workspaceId"`
 	Name          string    `json:"name"`
 	Slug          string    `json:"slug"`
 	EndpointKey   string    `json:"endpointKey"`
@@ -110,17 +111,61 @@ type ErrorEvent struct {
 	CreatedAt   time.Time `json:"createdAt"`
 }
 
-// DeliveryFilter narrows delivery listings.
+// DeliveryFilter narrows delivery listings. WorkspaceID scopes the listing to
+// one workspace; background workers leave it empty to sweep every workspace.
 type DeliveryFilter struct {
-	ProjectID  string
-	Status     string
-	IncidentID string
-	Limit      int
+	WorkspaceID string
+	ProjectID   string
+	Status      string
+	IncidentID  string
+	Limit       int
 }
 
-// IncidentFilter narrows incident listings.
+// IncidentFilter narrows incident listings. WorkspaceID scopes the listing to
+// one workspace; background workers leave it empty to sweep every workspace.
 type IncidentFilter struct {
-	ProjectID  string
-	AlertPhone string
-	Limit      int
+	WorkspaceID string
+	ProjectID   string
+	AlertPhone  string
+	Limit       int
+}
+
+// Workspace is one tenant boundary. Projects, sessions, and users all hang off
+// workspaces so two teams can never see each other's data.
+type Workspace struct {
+	ID          string    `json:"id"`
+	Name        string    `json:"name"`
+	Slug        string    `json:"slug"`
+	OwnerUserID string    `json:"ownerUserId"`
+	CreatedAt   time.Time `json:"createdAt"`
+}
+
+// User is one GitHub account that can sign in to PockDev.
+type User struct {
+	ID                 string    `json:"id"`
+	GitHubID           int64     `json:"githubId"`
+	GitHubLogin        string    `json:"githubLogin"`
+	Name               string    `json:"name"`
+	Email              string    `json:"email"`
+	AvatarURL          string    `json:"avatarUrl"`
+	DefaultWorkspaceID string    `json:"defaultWorkspaceId"`
+	CreatedAt          time.Time `json:"createdAt"`
+}
+
+// WorkspaceSummary is one workspace membership row for the workspace switcher.
+type WorkspaceSummary struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	Slug string `json:"slug"`
+	Role string `json:"role"`
+}
+
+// Session is one issued login token. Only the SHA-256 hash of the raw token is
+// ever stored; the raw token lives in the browser fragment alone.
+type Session struct {
+	TokenHash   string    `json:"-"`
+	UserID      string    `json:"userId"`
+	WorkspaceID string    `json:"workspaceId"`
+	ExpiresAt   time.Time `json:"expiresAt"`
+	CreatedAt   time.Time `json:"createdAt"`
 }

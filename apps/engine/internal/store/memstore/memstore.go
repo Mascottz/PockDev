@@ -7,39 +7,68 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Mascottz/PockDev/apps/engine/internal/id"
 	"github.com/Mascottz/PockDev/apps/engine/internal/model"
 	"github.com/Mascottz/PockDev/apps/engine/internal/store"
 )
 
 // Mem is a thread safe in-memory Store.
 type Mem struct {
-	mu         sync.Mutex
-	projects   map[string]*model.Project
-	deliveries map[string]*model.Delivery
-	incidents  map[string]*model.Incident
-	groups     map[string]*model.ErrorGroup
-	events     map[string]*model.ErrorEvent
-	nextGroup  int
+	mu           sync.Mutex
+	projects     map[string]*model.Project
+	deliveries   map[string]*model.Delivery
+	incidents    map[string]*model.Incident
+	groups       map[string]*model.ErrorGroup
+	events       map[string]*model.ErrorEvent
+	workspaces   map[string]*model.Workspace
+	users        map[string]*model.User
+	userByGitHub map[int64]string
+	sessions     map[string]*model.Session
+	nextGroup    int
 }
 
-// New returns an empty in-memory store.
+// New returns an in-memory store seeded with the default workspace, matching
+// the idempotent seed in schema.sql.
 func New() *Mem {
-	return &Mem{
-		projects:   map[string]*model.Project{},
-		deliveries: map[string]*model.Delivery{},
-		incidents:  map[string]*model.Incident{},
-		groups:     map[string]*model.ErrorGroup{},
-		events:     map[string]*model.ErrorEvent{},
+	m := &Mem{
+		projects:     map[string]*model.Project{},
+		deliveries:   map[string]*model.Delivery{},
+		incidents:    map[string]*model.Incident{},
+		groups:       map[string]*model.ErrorGroup{},
+		events:       map[string]*model.ErrorEvent{},
+		workspaces:   map[string]*model.Workspace{},
+		users:        map[string]*model.User{},
+		userByGitHub: map[int64]string{},
+		sessions:     map[string]*model.Session{},
 	}
+	m.workspaces[store.DefaultWorkspaceID] = &model.Workspace{
+		ID:   store.DefaultWorkspaceID,
+		Name: "Default Workspace",
+		Slug: "default",
+	}
+	return m
 }
 
 var _ store.Store = (*Mem)(nil)
 
+func workspaceOf(p *model.Project) string {
+	if p == nil || p.WorkspaceID == "" {
+		return store.DefaultWorkspaceID
+	}
+	return p.WorkspaceID
+}
+
 func (m *Mem) CreateProject(_ context.Context, p *model.Project) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if p.WorkspaceID == "" {
+		p.WorkspaceID = store.DefaultWorkspaceID
+	}
 	for _, x := range m.projects {
-		if x.Slug == p.Slug || x.EndpointKey == p.EndpointKey || x.SDKKey == p.SDKKey {
+		if x.EndpointKey == p.EndpointKey || x.SDKKey == p.SDKKey {
+			return fmt.Errorf("project already exists")
+		}
+		if x.Slug == p.Slug && workspaceOf(x) == p.WorkspaceID {
 			return fmt.Errorf("project already exists")
 		}
 	}
@@ -48,11 +77,14 @@ func (m *Mem) CreateProject(_ context.Context, p *model.Project) error {
 	return nil
 }
 
-func (m *Mem) ListProjects(_ context.Context) ([]model.Project, error) {
+func (m *Mem) ListProjects(_ context.Context, workspaceID string) ([]model.Project, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	out := make([]model.Project, 0, len(m.projects))
+	out := []model.Project{}
 	for _, p := range m.projects {
+		if workspaceOf(p) != workspaceID {
+			continue
+		}
 		out = append(out, *p)
 	}
 	return out, nil
@@ -65,7 +97,7 @@ func (m *Mem) GetProject(_ context.Context, id string) (*model.Project, error) {
 		cp := *p
 		return &cp, nil
 	}
-	return nil, fmt.Errorf("project not found")
+	return nil, store.ErrNotFound
 }
 
 func (m *Mem) GetProjectByEndpointKey(_ context.Context, key string) (*model.Project, error) {
@@ -77,7 +109,7 @@ func (m *Mem) GetProjectByEndpointKey(_ context.Context, key string) (*model.Pro
 			return &cp, nil
 		}
 	}
-	return nil, fmt.Errorf("project not found")
+	return nil, store.ErrNotFound
 }
 
 func (m *Mem) GetProjectBySDKKey(_ context.Context, key string) (*model.Project, error) {
@@ -89,7 +121,7 @@ func (m *Mem) GetProjectBySDKKey(_ context.Context, key string) (*model.Project,
 			return &cp, nil
 		}
 	}
-	return nil, fmt.Errorf("project not found")
+	return nil, store.ErrNotFound
 }
 
 func (m *Mem) CreateDelivery(_ context.Context, d *model.Delivery) error {
@@ -111,14 +143,14 @@ func (m *Mem) GetDelivery(_ context.Context, id string) (*model.Delivery, error)
 		cp.Headers = copyHeaders(d.Headers)
 		return &cp, nil
 	}
-	return nil, fmt.Errorf("delivery not found")
+	return nil, store.ErrNotFound
 }
 
 func (m *Mem) UpdateDelivery(_ context.Context, d *model.Delivery) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, ok := m.deliveries[d.ID]; !ok {
-		return fmt.Errorf("delivery not found")
+		return store.ErrNotFound
 	}
 	cp := *d
 	cp.PayloadKeys = append([]string(nil), d.PayloadKeys...)
@@ -134,6 +166,12 @@ func (m *Mem) ListDeliveries(_ context.Context, f model.DeliveryFilter) ([]model
 	for _, d := range m.deliveries {
 		if f.ProjectID != "" && d.ProjectID != f.ProjectID {
 			continue
+		}
+		if f.WorkspaceID != "" {
+			p, ok := m.projects[d.ProjectID]
+			if !ok || workspaceOf(p) != f.WorkspaceID {
+				continue
+			}
 		}
 		if f.Status != "" && d.Status != f.Status {
 			continue
@@ -210,7 +248,7 @@ func (m *Mem) GetIncident(_ context.Context, id string) (*model.Incident, error)
 		cp := *i
 		return &cp, nil
 	}
-	return nil, fmt.Errorf("incident not found")
+	return nil, store.ErrNotFound
 }
 
 func (m *Mem) ListIncidents(_ context.Context, f model.IncidentFilter) ([]model.Incident, error) {
@@ -220,6 +258,12 @@ func (m *Mem) ListIncidents(_ context.Context, f model.IncidentFilter) ([]model.
 	for _, i := range m.incidents {
 		if f.ProjectID != "" && i.ProjectID != f.ProjectID {
 			continue
+		}
+		if f.WorkspaceID != "" {
+			p, ok := m.projects[i.ProjectID]
+			if !ok || workspaceOf(p) != f.WorkspaceID {
+				continue
+			}
 		}
 		if f.AlertPhone != "" && i.LastAlertPhone != f.AlertPhone {
 			continue
@@ -237,7 +281,7 @@ func (m *Mem) UpdateIncident(_ context.Context, i *model.Incident) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, ok := m.incidents[i.ID]; !ok {
-		return fmt.Errorf("incident not found")
+		return store.ErrNotFound
 	}
 	cp := *i
 	m.incidents[i.ID] = &cp
@@ -313,7 +357,7 @@ func (m *Mem) ErrorEventByDelivery(_ context.Context, deliveryID string) (*model
 		}
 	}
 	if newest == nil {
-		return nil, fmt.Errorf("error event not found")
+		return nil, store.ErrNotFound
 	}
 	cp := *newest
 	return &cp, nil
@@ -332,7 +376,7 @@ func (m *Mem) LatestErrorEvent(_ context.Context, groupID string) (*model.ErrorE
 		}
 	}
 	if newest == nil {
-		return nil, fmt.Errorf("error event not found")
+		return nil, store.ErrNotFound
 	}
 	cp := *newest
 	return &cp, nil
@@ -345,7 +389,7 @@ func (m *Mem) GetErrorGroup(_ context.Context, id string) (*model.ErrorGroup, er
 		cp := *g
 		return &cp, nil
 	}
-	return nil, fmt.Errorf("error group not found")
+	return nil, store.ErrNotFound
 }
 
 func (m *Mem) GetErrorGroupByFingerprint(_ context.Context, projectID, fingerprint string) (*model.ErrorGroup, error) {
@@ -357,39 +401,44 @@ func (m *Mem) GetErrorGroupByFingerprint(_ context.Context, projectID, fingerpri
 			return &cp, nil
 		}
 	}
-	return nil, fmt.Errorf("error group not found")
+	return nil, store.ErrNotFound
 }
 
 func (m *Mem) UpdateErrorGroup(_ context.Context, g *model.ErrorGroup) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, ok := m.groups[g.ID]; !ok {
-		return fmt.Errorf("error group not found")
+		return store.ErrNotFound
 	}
 	cp := *g
 	m.groups[g.ID] = &cp
 	return nil
 }
 
-func (m *Mem) Overview(_ context.Context, now time.Time) (store.Overview, error) {
+func (m *Mem) Overview(_ context.Context, workspaceID string, now time.Time) (store.Overview, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	o := store.Overview{HealthyRate: 100}
-	seen := map[string]bool{}
 	for _, p := range m.projects {
-		if !seen[p.ID] {
-			seen[p.ID] = true
+		if workspaceOf(p) == workspaceID {
 			o.ProjectsCount++
 		}
 	}
 	for _, i := range m.incidents {
-		if i.Status == model.IncidentOpen {
+		if i.Status != model.IncidentOpen {
+			continue
+		}
+		if p, ok := m.projects[i.ProjectID]; ok && workspaceOf(p) == workspaceID {
 			o.OpenIncidents++
 		}
 	}
 	dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
 	var finished, delivered int
 	for _, d := range m.deliveries {
+		p, ok := m.projects[d.ProjectID]
+		if !ok || workspaceOf(p) != workspaceID {
+			continue
+		}
 		if d.Status == model.DeliveryPaused {
 			o.PausedDeliveries++
 		}
@@ -410,6 +459,171 @@ func (m *Mem) Overview(_ context.Context, now time.Time) (store.Overview, error)
 		o.HealthyRate = 100
 	}
 	return o, nil
+}
+
+func (m *Mem) UpsertGitHubUser(_ context.Context, ghID int64, login, name, email, avatarURL string, claimDefault bool) (*model.User, *model.Workspace, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if uid, ok := m.userByGitHub[ghID]; ok {
+		u := m.users[uid]
+		u.GitHubLogin = login
+		u.Name = name
+		u.Email = email
+		u.AvatarURL = avatarURL
+		cpU := *u
+		w := m.workspaces[u.DefaultWorkspaceID]
+		var cpW *model.Workspace
+		if w != nil {
+			wcp := *w
+			cpW = &wcp
+		}
+		return &cpU, cpW, nil
+	}
+
+	userID := id.New("usr_", 16)
+	var wsp *model.Workspace
+	if claimDefault {
+		def := m.workspaces[store.DefaultWorkspaceID]
+		if def != nil && def.OwnerUserID == "" {
+			def.OwnerUserID = userID
+			if def.Name == "Default Workspace" {
+				def.Name = login + " Workspace"
+			}
+			wsp = def
+		}
+	}
+	if wsp == nil {
+		wsp = m.insertWorkspaceLocked(userID, login+" Workspace", uniqueSlug(m, login))
+	}
+	u := &model.User{
+		ID:                 userID,
+		GitHubID:           ghID,
+		GitHubLogin:        login,
+		Name:               name,
+		Email:              email,
+		AvatarURL:          avatarURL,
+		DefaultWorkspaceID: wsp.ID,
+		CreatedAt:          time.Now(),
+	}
+	m.users[u.ID] = u
+	m.userByGitHub[ghID] = u.ID
+	cpU := *u
+	cpW := *wsp
+	return &cpU, &cpW, nil
+}
+
+func (m *Mem) insertWorkspaceLocked(ownerUserID, name, slug string) *model.Workspace {
+	w := &model.Workspace{
+		ID:          id.New("wsp_", 16),
+		Name:        name,
+		Slug:        slug,
+		OwnerUserID: ownerUserID,
+		CreatedAt:   time.Now(),
+	}
+	m.workspaces[w.ID] = w
+	return w
+}
+
+func uniqueSlug(m *Mem, login string) string {
+	base := store.Slugify(login)
+	if base == "" {
+		base = "user"
+	}
+	slug := base
+	for i := 0; i < 5; i++ {
+		taken := false
+		for _, w := range m.workspaces {
+			if w.Slug == slug {
+				taken = true
+				break
+			}
+		}
+		if !taken {
+			return slug
+		}
+		slug = base + "-" + id.Token(4)
+	}
+	return base + "-" + id.Token(8)
+}
+
+func (m *Mem) ListUserWorkspaces(_ context.Context, userID string) ([]model.WorkspaceSummary, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := []model.WorkspaceSummary{}
+	for _, w := range m.workspaces {
+		if w.OwnerUserID != userID {
+			continue
+		}
+		out = append(out, model.WorkspaceSummary{ID: w.ID, Name: w.Name, Slug: w.Slug, Role: "owner"})
+	}
+	return out, nil
+}
+
+func (m *Mem) GetWorkspace(_ context.Context, id string) (*model.Workspace, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if w, ok := m.workspaces[id]; ok {
+		cp := *w
+		return &cp, nil
+	}
+	return nil, store.ErrNotFound
+}
+
+func (m *Mem) CreateWorkspace(_ context.Context, userID, name, slug string) (*model.Workspace, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if slug == "" {
+		slug = store.Slugify(name)
+	}
+	for _, w := range m.workspaces {
+		if w.Slug == slug {
+			return nil, fmt.Errorf("workspace with this slug already exists")
+		}
+	}
+	w := m.insertWorkspaceLocked(userID, name, slug)
+	cp := *w
+	return &cp, nil
+}
+
+func (m *Mem) UserHasWorkspace(_ context.Context, userID, workspaceID string) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	w, ok := m.workspaces[workspaceID]
+	if !ok {
+		return false, nil
+	}
+	return w.OwnerUserID == userID, nil
+}
+
+func (m *Mem) CreateSession(_ context.Context, sess *model.Session) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cp := *sess
+	m.sessions[sess.TokenHash] = &cp
+	return nil
+}
+
+func (m *Mem) GetSession(_ context.Context, tokenHash string, now time.Time) (*model.Session, *model.User, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	s, ok := m.sessions[tokenHash]
+	if !ok || !s.ExpiresAt.After(now) {
+		return nil, nil, store.ErrNotFound
+	}
+	u, ok := m.users[s.UserID]
+	if !ok {
+		return nil, nil, store.ErrNotFound
+	}
+	cpS := *s
+	cpU := *u
+	return &cpS, &cpU, nil
+}
+
+func (m *Mem) DeleteSession(_ context.Context, tokenHash string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.sessions, tokenHash)
+	return nil
 }
 
 func copyHeaders(h map[string]string) map[string]string {
