@@ -20,6 +20,14 @@ import (
 
 const testSecret = "rimbra-secret"
 
+type sentWhatsApp struct {
+	Channel string `json:"channel"`
+	To      string `json:"to"`
+	Content struct {
+		Text string `json:"text"`
+	} `json:"content"`
+}
+
 func sign(body string) string {
 	mac := hmac.New(sha256.New, []byte(testSecret))
 	mac.Write([]byte(body))
@@ -47,12 +55,12 @@ func seed(t *testing.T, st *memstore.Mem) {
 	})
 }
 
-func newHook(t *testing.T, st *memstore.Mem, sent *[]string) *Hook {
+func newHook(t *testing.T, st *memstore.Mem, sent *[]sentWhatsApp) *Hook {
 	t.Helper()
 	notifySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var body map[string]string
+		var body sentWhatsApp
 		_ = json.NewDecoder(r.Body).Decode(&body)
-		*sent = append(*sent, body["message"])
+		*sent = append(*sent, body)
 		w.WriteHeader(http.StatusOK)
 	}))
 	t.Cleanup(notifySrv.Close)
@@ -78,7 +86,7 @@ func post(t *testing.T, h *Hook, body, sig string) *httptest.ResponseRecorder {
 func TestSignatureRequired(t *testing.T) {
 	st := memstore.New()
 	seed(t, st)
-	var sent []string
+	var sent []sentWhatsApp
 	h := newHook(t, st, &sent)
 
 	body := `{"from": "+234801", "text": "2"}`
@@ -96,15 +104,15 @@ func TestSignatureRequired(t *testing.T) {
 func TestReplyTwoReplays(t *testing.T) {
 	st := memstore.New()
 	seed(t, st)
-	var sent []string
+	var sent []sentWhatsApp
 	h := newHook(t, st, &sent)
 
 	body := `{"from": {"phone": "+234801"}, "message": {"text": "2"}}`
 	if rec := post(t, h, body, sign(body)); rec.Code != http.StatusOK {
 		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
 	}
-	if len(sent) != 1 || !strings.Contains(sent[0], "Replaying 1 paused webhooks") {
-		t.Fatalf("replies %v", sent)
+	if len(sent) != 1 || sent[0].Channel != "whatsapp" || sent[0].To != "+234801" || !strings.Contains(sent[0].Content.Text, "Replaying 1 paused webhooks") {
+		t.Fatalf("replies %+v", sent)
 	}
 	d, _ := st.GetDelivery(context.Background(), "dlv_1")
 	if d.Status != model.DeliveryRetrying {
@@ -115,7 +123,7 @@ func TestReplyTwoReplays(t *testing.T) {
 func TestReplyThreeMutes(t *testing.T) {
 	st := memstore.New()
 	seed(t, st)
-	var sent []string
+	var sent []sentWhatsApp
 	h := newHook(t, st, &sent)
 
 	body := `{"from": "+234801", "text": "3"}`
@@ -126,38 +134,110 @@ func TestReplyThreeMutes(t *testing.T) {
 	if inc.Status != model.IncidentMuted {
 		t.Fatalf("incident %s", inc.Status)
 	}
-	if len(sent) != 1 || !strings.Contains(sent[0], "Muted") {
-		t.Fatalf("replies %v", sent)
+	if len(sent) != 1 || sent[0].Channel != "whatsapp" || sent[0].To != "+234801" || !strings.Contains(sent[0].Content.Text, "Muted") {
+		t.Fatalf("replies %+v", sent)
 	}
 }
 
-func TestUnknownReplyGetsMenu(t *testing.T) {
+func TestNonCommandChatIgnored(t *testing.T) {
 	st := memstore.New()
 	seed(t, st)
-	var sent []string
+	var sent []sentWhatsApp
 	h := newHook(t, st, &sent)
 
 	body := `{"from": "+234801", "text": "hello"}`
 	if rec := post(t, h, body, sign(body)); rec.Code != http.StatusOK {
 		t.Fatalf("status %d", rec.Code)
 	}
-	if len(sent) != 1 || !strings.Contains(sent[0], "Reply 1 to open a fix PR") {
-		t.Fatalf("replies %v", sent)
+	if len(sent) != 0 {
+		t.Fatalf("expected 0 replies for non-command chat, got %+v", sent)
 	}
 }
 
-func TestUnknownNumber(t *testing.T) {
+func TestOpaqueLIDSenderResolvesToAlertedPhone(t *testing.T) {
 	st := memstore.New()
 	seed(t, st)
-	var sent []string
+	var sent []sentWhatsApp
 	h := newHook(t, st, &sent)
 
-	body := `{"from": "+1000", "text": "1"}`
+	body := `{"event":"message.received","data":{"from":"55693746942040","content":{"text":"3"}}}`
 	if rec := post(t, h, body, sign(body)); rec.Code != http.StatusOK {
-		t.Fatalf("status %d", rec.Code)
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
 	}
-	if len(sent) != 1 || !strings.Contains(sent[0], "do not have an open alert") {
-		t.Fatalf("replies %v", sent)
+	inc, _ := st.GetIncident(context.Background(), "inc_1")
+	if inc.Status != model.IncidentMuted {
+		t.Fatalf("incident status %s, want muted", inc.Status)
+	}
+	if len(sent) != 1 {
+		t.Fatalf("expected 1 reply, got %+v", sent)
+	}
+	if sent[0].Channel != "whatsapp" || sent[0].To != "+234801" {
+		t.Fatalf("expected reply routed to LastAlertPhone +234801, got %+v", sent[0])
+	}
+	if !strings.Contains(sent[0].Content.Text, "Muted") {
+		t.Fatalf("unexpected reply text: %q", sent[0].Content.Text)
+	}
+}
+
+func TestShortTagMatchesAcrossMultiplePhones(t *testing.T) {
+	st := memstore.New()
+	now := time.Now()
+	alertAt := now.Add(-5 * time.Minute)
+
+	_ = st.CreateProject(context.Background(), &model.Project{
+		ID: "prj_a", Name: "alpha-api", Slug: "alpha-api", EndpointKey: "ek_a",
+		SDKKey: "pk_a", WhatsAppPhone: "+234801", Status: "active", CreatedAt: now,
+	})
+	_ = st.CreateProject(context.Background(), &model.Project{
+		ID: "prj_b", Name: "beta-api", Slug: "beta-api", EndpointKey: "ek_b",
+		SDKKey: "pk_b", WhatsAppPhone: "+234802", Status: "active", CreatedAt: now,
+	})
+	_ = st.CreateIncident(context.Background(), &model.Incident{
+		ID: "inc_alpha_a1b2", ProjectID: "prj_a", Title: "Alpha crash",
+		Status: model.IncidentOpen, LastAlertPhone: "+234801", LastAlertAt: &alertAt,
+		LastSeenAt: now, CreatedAt: now,
+	})
+	_ = st.CreateIncident(context.Background(), &model.Incident{
+		ID: "inc_beta_c3d4", ProjectID: "prj_b", Title: "Beta crash",
+		Status: model.IncidentOpen, LastAlertPhone: "+234802", LastAlertAt: &alertAt,
+		LastSeenAt: now, CreatedAt: now,
+	})
+	_ = st.CreateDelivery(context.Background(), &model.Delivery{
+		ID: "dlv_a", ProjectID: "prj_a", Status: model.DeliveryPaused,
+		LinkedIncidentID: "inc_alpha_a1b2", CreatedAt: now,
+	})
+	_ = st.CreateDelivery(context.Background(), &model.Delivery{
+		ID: "dlv_b", ProjectID: "prj_b", Status: model.DeliveryPaused,
+		LinkedIncidentID: "inc_beta_c3d4", CreatedAt: now,
+	})
+
+	var sent []sentWhatsApp
+	h := newHook(t, st, &sent)
+
+	// Without a 4-char tag, an unknown LID with multiple active phones sends 0 replies.
+	ambiguous := `{"event":"message.received","data":{"from":"99887766554433","content":{"text":"2"}}}`
+	if rec := post(t, h, ambiguous, sign(ambiguous)); rec.Code != http.StatusOK {
+		t.Fatalf("ambiguous status %d", rec.Code)
+	}
+	if len(sent) != 0 {
+		t.Fatalf("expected 0 replies for ambiguous LID, got %+v", sent)
+	}
+
+	// With the 4-char tag "c3d4", it matches inc_beta_c3d4 and replies to +234802.
+	tagged := `{"event":"message.received","data":{"from":"99887766554433","content":{"text":"2 c3d4"}}}`
+	if rec := post(t, h, tagged, sign(tagged)); rec.Code != http.StatusOK {
+		t.Fatalf("tagged status %d: %s", rec.Code, rec.Body.String())
+	}
+	if len(sent) != 1 || sent[0].Channel != "whatsapp" || sent[0].To != "+234802" || !strings.Contains(sent[0].Content.Text, "Replaying 1 paused webhooks") {
+		t.Fatalf("tagged replies %+v", sent)
+	}
+	dlvA, _ := st.GetDelivery(context.Background(), "dlv_a")
+	dlvB, _ := st.GetDelivery(context.Background(), "dlv_b")
+	if dlvA.Status != model.DeliveryPaused {
+		t.Fatalf("dlv_a should stay paused, got %s", dlvA.Status)
+	}
+	if dlvB.Status != model.DeliveryRetrying {
+		t.Fatalf("dlv_b should be retrying, got %s", dlvB.Status)
 	}
 }
 
@@ -167,6 +247,7 @@ func TestInboundShapes(t *testing.T) {
 	}{
 		{`{"from": "+1", "text": "hi"}`, "+1", "hi"},
 		{`{"from": {"phone": "+2"}, "message": {"text": "yo"}}`, "+2", "yo"},
+		{`{"from": "55693746942040", "content": {"text": "3"}}`, "55693746942040", "3"},
 		{`{"phone": "+3", "body": "sup"}`, "+3", "sup"},
 	}
 	for _, c := range cases {

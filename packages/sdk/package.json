@@ -2,6 +2,34 @@
   "name": "@pockdev/sdk",
   "version": "0.1.0",
   "description": "Zero-dependency crash capture SDK for PockDev webhook and error linking.",
+  "license": "MIT",
+  "author": "Ayomide Akintokun (aka Mascottz) <akinmi360@gmail.com>",
+  "homepage": "https://pockdev.vercel.app",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Mascottz/PockDev.git",
+    "directory": "packages/sdk"
+  },
+  "bugs": {
+    "url": "https://github.com/Mascottz/PockDev/issues"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "pockdev",
+    "webhooks",
+    "error-tracking",
+    "devops",
+    "whatsapp",
+    "paystack",
+    "stripe",
+    "nodejs",
+    "nextjs"
+  ],
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -12,11 +40,14 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "node --test test/sdk.test.mjs"
+    "test": "node --test test/sdk.test.mjs",
+    "prepublishOnly": "npm run build && npm run test"
   },
   "devDependencies": {
     "typescript": "^5.7.2"
